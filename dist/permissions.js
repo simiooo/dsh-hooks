@@ -94,6 +94,15 @@ export async function installPermissionApi(ctx, actions) {
                 if (!object(request) || typeof request.id !== 'string' || !request.id || typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint) || typeof request.decision !== 'string' || !['allow-session', 'allow-permanent', 'deny'].includes(request.decision))
                     throw new TypeError('invalid hook decision');
                 const entry = pending.get(request.id);
+                if (!entry && request.id.startsWith('manual:')) {
+                    const accepted = await actions.answerManual({ sessionId: sid, id: request.id, fingerprint: request.fingerprint, decision: request.decision });
+                    if (accepted)
+                        for (const queued of [...pending.values()]) {
+                            if (queued.request.sessionId === sid && queued.request.fingerprint === request.fingerprint)
+                                await queued.finish(request.decision === 'deny' ? 'deny' : 'allow-session');
+                        }
+                    return { accepted };
+                }
                 if (!entry || entry.request.sessionId !== sid || entry.request.fingerprint !== request.fingerprint)
                     return { accepted: false };
                 return { accepted: await entry.finish(request.decision) };

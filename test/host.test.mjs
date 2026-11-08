@@ -23,7 +23,7 @@ async function fixture(t, handlers = {}, options = {}) {
   let ensureCount = 0;
   const ctx = {
     on(event, callback) { listeners.set(event, callback); return () => listeners.delete(event); },
-    inject() {}, effect(init) { cleanups.push(init()); }, logger: { warn: x => logs.push(x) },
+    inject(dependencies, init) { if (dependencies.length === 1 && dependencies[0] === 'approval') void init(ctx); }, effect(init) { cleanups.push(init()); }, logger: { warn: x => logs.push(x) },
     workingDirectory: { async ensure(...args) { ensureCount++; return options.ensure ? options.ensure(...args) : dir; } },
     approval: { async request(request) { reviews.push(request); return options.authorize ? options.authorize(request) : 'allowed-once'; } },
     shell: { resolve: x => x, async execute(request) {

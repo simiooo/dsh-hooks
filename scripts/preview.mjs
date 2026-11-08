@@ -14,6 +14,7 @@ const native = await nativeUiPreview(process.env.DSH_SOURCE_DIR);
 const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hooks component QA</title>
 <style>*{box-sizing:border-box}body{margin:0;font:14px/1.5 "Segoe UI",sans-serif;background:#f7f8fb;color:#20232b}main{max-width:780px;margin:40px auto;padding:24px}header{font-size:18px;font-weight:600;margin-bottom:180px}.composer{background:#fff;padding:16px;border:1px solid #d9dde8;border-radius:16px;box-shadow:0 8px 32px #20232b09}textarea{width:100%;border:0;resize:none;padding:10px 0;color:inherit;font:inherit;outline:none}footer{display:flex;align-items:center;justify-content:space-between;color:#636a7b;font-size:12px}.send{background:#3155d9;color:white;border:0;border-radius:50%;width:32px;height:32px}@media(max-width:480px){main{padding:16px;margin:16px auto}header{margin-bottom:100px}}</style>
 <main><header>DeepSeek Harness · Hooks</header><div id="root"></div></main>
+<style>main{max-width:none}#root{--dsh-composer-card-max-width:720px;--dsh-composer-side-clearance:16px;--dsh-composer-stack-gap:6px;display:flex;flex-direction:column;gap:var(--dsh-composer-stack-gap)}#root[data-layout=hero]{width:min(calc(var(--dsh-composer-card-max-width) + 2 * var(--dsh-composer-side-clearance)),100%);margin-inline:auto}</style>
 <style>${native.css}button{font-family:inherit}.native-modal-body{min-width:0}</style><script src="/react.js"></script><script src="/react-dom.js"></script><script>${native.js}</script><script>window.__ModuleLoader__={load(def){window.hooksPlugin=def.factory(name=>name==='react'?React:hooksUi)}};</script><script src="/client.js"></script>
 <script>
 const h=React.createElement; let Dock, Revoke; window.answers=[];window.forgotten=[];window.permissionStatus=null;
@@ -21,7 +22,7 @@ let requests=[{id:'preview',schema:'dsh-hooks/approval-v1',scope:'session',sessi
 {event:'SessionStart',statusMessage:'加载项目上下文',command:'node ./hooks/context.mjs',source:'.codex/hooks.json'},
 {event:'PreToolUse',statusMessage:'检查待执行命令',command:'node ./hooks/guard.mjs',source:'.codex/hooks.json'}]}];
 const ctx={effect:fn=>fn(),inject:(_keys,fn)=>fn(ctx),locale:{register:(_ns,dict)=>{window.t=k=>dict.zh[k];return()=>{}}},slots:{inject:(_name,fn)=>fn(),register:(spec,Comp)=>{if(spec.name==='conversation.input.dock')Dock=Comp;else if(spec.name==='conversation.input.right')Revoke=Comp;return()=>{}}},remote:{$mount:async()=>()=>{},dshHooksPermissions:{list:async()=>({ok:true,value:{requests,status:permissionStatus}}),answer:async request=>{answers.push(request);requests=[];return{ok:true,value:{accepted:true}}},status:async()=>({ok:true,value:{permanent:true,cwd:'D:/work/project',session:true}}),forget:async request=>{forgotten.push(request);return{ok:true,value:{revoked:true}}},revoke:async()=>({ok:true,value:{revoked:true}})}}};
-(async()=>{await hooksPlugin.apply(ctx);ReactDOM.createRoot(document.getElementById('root')).render(h(React.Fragment,null,h(Dock,{sessionId:'preview',t}),h('div',{className:'composer'},h('textarea',{'aria-label':'message',placeholder:'发送消息',rows:2,defaultValue:'正在编辑的草稿'}),h('footer',null,h('span',null,'DeepSeek V4'),h('div',null,h(Revoke,{sessionId:'preview',t}),h('button',{className:'send','aria-label':'发送'},'↑'))))));})();
+(async()=>{await hooksPlugin.apply(ctx);ReactDOM.createRoot(document.getElementById('root')).render(h(React.Fragment,null,h(Dock,{sessionId:'preview',t}),h('div',{className:'native-inputbar-root'},h('div',{className:'composer native-inputbar-card','data-composer-card':''},h('textarea',{'aria-label':'message',placeholder:'发送消息',rows:2,defaultValue:'正在编辑的草稿'}),h('footer',null,h('span',null,'DeepSeek V4'),h('div',null,h(Revoke,{sessionId:'preview',t}),h('button',{className:'send','aria-label':'发送'},'↑')))))));})();
 </script></html>`;
 const server = http.createServer(async (req, res) => {
   try {
@@ -40,6 +41,24 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`); await page.getByRole('button', { name: 'Hooks 待授权' }).waitFor();
   assert.equal(await page.getByRole('button', { name: '本会话允许' }).count(), 0);
   const trigger = page.getByRole('button', { name: 'Hooks 待授权' }); const rect = await trigger.boundingBox(); assert(rect.height <= 36 && rect.width < 240);
+  async function aligned() {
+    const [badge, card] = await Promise.all([page.locator('.dsh-hooks-trigger').boundingBox(), page.locator('[data-composer-card]').boundingBox()]);
+    assert(Math.abs(badge.x-card.x)<1, `badge ${badge.x} must align with native input card ${card.x}`);
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  }
+  for (const geometry of [
+    { width: 1440, cap:'720px', side:'16px', layout:'normal' },
+    { width: 1000, cap:'520px', side:'24px', layout:'normal' },
+    { width: 1000, cap:'720px', side:'16px', layout:'hero' },
+    { width: 390, cap:'720px', side:'16px', layout:'normal' },
+    { width: 390, cap:'min(calc(100% - 16px), 952px)', side:'8px', layout:'embedded' },
+  ]) {
+    await page.setViewportSize({width:geometry.width,height:760});
+    await page.evaluate(g=>{const root=document.getElementById('root');root.style.setProperty('--dsh-composer-card-max-width',g.cap);root.style.setProperty('--dsh-composer-side-clearance',g.side);root.dataset.layout=g.layout;},geometry);
+    await aligned();
+  }
+  await page.setViewportSize({width:1000,height:760});
+  await page.evaluate(()=>{const root=document.getElementById('root');root.style.setProperty('--dsh-composer-card-max-width','720px');root.style.setProperty('--dsh-composer-side-clearance','16px');root.dataset.layout='normal';});
   await page.screenshot({ path: new URL('permissions-compact-desktop.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
   await trigger.click(); await page.getByRole('dialog', { name: 'Hooks 授权' }).waitFor();
   assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), '关闭');
@@ -71,12 +90,15 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: new URL('permissions-mobile-dark.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
   await page.getByRole('button', { name: '关闭' }).click(); assert.equal(await page.evaluate(() => answers.length), 1);
-  await page.evaluate(() => { permissionStatus = { ...requests[0], session:false, permanent:false, approvalPolicy:'never' }; requests=[]; });
+  await page.evaluate(() => { permissionStatus = { ...requests[0], session:false, permanent:false, approvalPolicy:'never', review:{...requests[0],id:'manual:preview',manual:true} }; requests=[]; });
   await page.getByRole('button', { name: 'Hooks 已跳过' }).waitFor(); assert.equal(await page.getByRole('dialog').count(), 0);
   await page.getByRole('textbox', { name:'message' }).fill('未授权时仍可输入和发送');
   await page.screenshot({ path: new URL('permissions-skipped.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
-  await page.getByRole('button', { name: 'Hooks 已跳过' }).click(); assert.equal(await page.getByRole('button', { name:'永久允许', exact:true }).count(), 0);
-  assert(await page.getByRole('dialog').innerText().then(text=>text.includes('当前模式关闭了审批'))); assert.equal(await page.evaluate(()=>answers.length),1);
+  await aligned();
+  await page.getByRole('button', { name: 'Hooks 已跳过' }).click(); assert.equal(await page.getByRole('button', { name:'永久允许', exact:true }).count(), 1);
+  assert(await page.getByRole('dialog').innerText().then(text=>text.includes('手动授权从后续事件生效')));
+  await page.screenshot({ path: new URL('permissions-manual.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
+  await page.getByRole('button', { name:'永久允许', exact:true }).click(); assert.equal(await page.evaluate(()=>answers[1].id),'manual:preview');
   assert.deepEqual(errors, []);
   console.log('Browser QA passed with real Harness Modal/Button/theme: compact trigger, desktop/mobile dialog, focus restoration, permanent approval, revoke and retained draft.');
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

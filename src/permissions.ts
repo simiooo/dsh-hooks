@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { EVENTS, object } from './protocol.js';
-import type { PermissionRequest } from './engine.js';
+import type { PermissionRequest, ManualAnswer } from './engine.js';
 
 export function isPermissionRequest(value: unknown): value is PermissionRequest {
   return object(value) && value.schema === 'dsh-hooks/approval-v1' && value.scope === 'session'
@@ -17,6 +17,7 @@ interface PermissionActions {
   remember(request: PermissionRequest, signal: AbortSignal): Promise<void>;
   status(sessionId: string): Promise<unknown>;
   forget(sessionId: string): Promise<void>;
+  answerManual(request: ManualAnswer): Promise<boolean>;
 }
 type Decision = 'allow-session' | 'allow-permanent' | 'deny';
 export async function installPermissionApi(ctx: any, actions: PermissionActions): Promise<void> {
@@ -44,6 +45,13 @@ export async function installPermissionApi(ctx: any, actions: PermissionActions)
       this.owner(); const sid = sessionId(request);
       if (!object(request) || typeof request.id !== 'string' || !request.id || typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint) || typeof request.decision !== 'string' || !['allow-session', 'allow-permanent', 'deny'].includes(request.decision)) throw new TypeError('invalid hook decision');
       const entry = pending.get(request.id);
+      if (!entry && request.id.startsWith('manual:')) {
+        const accepted = await actions.answerManual({ sessionId: sid, id: request.id, fingerprint: request.fingerprint, decision: request.decision as Decision });
+        if (accepted) for (const queued of [...pending.values()]) {
+          if (queued.request.sessionId === sid && queued.request.fingerprint === request.fingerprint) await queued.finish(request.decision === 'deny' ? 'deny' : 'allow-session');
+        }
+        return { accepted };
+      }
       if (!entry || entry.request.sessionId !== sid || entry.request.fingerprint !== request.fingerprint) return { accepted: false };
       return { accepted: await entry.finish(request.decision as Decision) };
     }

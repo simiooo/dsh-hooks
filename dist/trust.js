@@ -81,5 +81,33 @@ export class PermanentTrust {
             }
         });
     }
+    /** Records the owner's explicit intent; only a matching live engine or durable grant can execute it. */
+    async recordDecision(request, current) {
+        return this.serialize(async () => {
+            const directory = join(this.directory, 'audit'), id = randomUUID(), path = join(directory, `${id}.json`), temporary = `${path}.tmp`;
+            const record = { schema: 'dsh-hooks/owner-decision-v1', id, actor: 'interactive-host-owner', phase: 'requested', at: new Date().toISOString(),
+                cwd: await this.scope(request.cwd), sessionId: request.sessionId, fingerprint: request.fingerprint, reviewId: request.id, decision: request.decision };
+            const valid = async () => { try {
+                return await current();
+            }
+            catch {
+                return false;
+            } };
+            await mkdir(directory, { recursive: true, mode: 0o700 });
+            try {
+                await writeFile(temporary, JSON.stringify(record, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+                if (!await valid())
+                    throw new Error('Hook review changed. Reopen it before approving.');
+                await rename(temporary, path);
+                if (!await valid()) {
+                    await unlink(path);
+                    throw new Error('Hook review was withdrawn.');
+                }
+            }
+            finally {
+                await unlink(temporary).catch(() => { });
+            }
+        });
+    }
 }
 //# sourceMappingURL=trust.js.map

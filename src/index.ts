@@ -9,7 +9,7 @@ export type { Options, Snapshot } from './config.js';
 export type { PermissionRequest } from './engine.js';
 
 export const name = 'simiooo-hooks';
-export const inject = ['shell', 'workingDirectory', 'approval'];
+export const inject = ['shell', 'workingDirectory'];
 // Structural public contracts keep this external package independent of monorepo builds.
 type Block = { type: string; text?: string };
 type Message = { id: string; role: 'user'; content: Block[]; source: { kind: string; event: string } };
@@ -22,7 +22,7 @@ interface Agent {
 }
 interface Context {
   shell: Shell;
-  approval: { config?: { policy?: 'ask' | 'never' }; request(request: { agent: Agent; toolName: string; reason: string; displayReason?: { en: string; zh: string }; signal: AbortSignal }): Promise<string> };
+  approval?: { config?: { policy?: 'ask' | 'never' }; request(request: { agent: Agent; toolName: string; reason: string; displayReason?: { en: string; zh: string }; signal: AbortSignal }): Promise<string> };
   workingDirectory: { defaultDirectory?: string; get?(session: Session): string; ensure(agent: Agent, signal: AbortSignal): Promise<string> };
   logger: { warn(message: string): void };
   on(event: string, callback: (...args: any[]) => any): () => void;
@@ -49,15 +49,21 @@ export function apply(ctx: Context, options: Options = {}): void {
   const ended = new WeakSet<Agent>();
   const compactionBridges = new Set<ReturnType<typeof installCompactionBridge>>();
   const lifetime = new AbortController();
+  let independentConsent = false;
+  let nativeApproval: Context['approval'];
+  ctx.inject(['approval'], async scope => { nativeApproval = scope.approval; });
   const track = (promise: Promise<unknown>) => {
     detached.add(promise); void promise.catch(error => ctx.logger.warn(String(error))).finally(() => detached.delete(promise));
   };
   const authorize = async (request: PermissionRequest, signal: AbortSignal) => {
+    // Web/desktop consent is its own explicit Owner setting. Never enter the tool approval policy.
+    if (independentConsent) return 'deferred' as const;
     const agent = [...states.keys()].find(a => a.id === request.sessionId);
-    if (!agent) return false;
+    if (!agent || !nativeApproval) return 'deferred' as const;
+    // Compatibility answerer for compositions without the Web/desktop permission API.
     // This grants one explicit operation: trust this complete config revision for this session.
     const commands = request.hooks.map(h => `${h.event}: ${h.command}\n${h.source}`).join('\n\n');
-    return await ctx.approval.request({ agent, toolName: 'dsh-hooks', reason: JSON.stringify(request), signal,
+    return await nativeApproval.request({ agent, toolName: 'dsh-hooks', reason: JSON.stringify(request), signal,
       displayReason: {
         en: `Allow these hooks for this session and this exact version? File changes require a new review.\n\n${commands}`,
         zh: `允许本会话运行以下版本的 Hooks？文件变化后需重新授权。\n\n${commands}`,
@@ -73,11 +79,13 @@ export function apply(ctx: Context, options: Options = {}): void {
     await Promise.allSettled([...states.keys()].map(agent => engine.refresh(agent.id)));
   });
   ctx.inject(['typertGateway'], async apiCtx => {
+    independentConsent = true;
     const { installPermissionApi } = await import('./permissions.js');
     await installPermissionApi(apiCtx, {
       revoke: id => engine.revoke(id), remember: (request, signal) => engine.remember(request, signal),
-      status: async id => ({ ...await engine.permissionStatus(id), approvalPolicy: [...states].find(([agent]) => agent.id === id)?.[1].approvalPolicy ?? ctx.approval.config?.policy ?? 'ask' }),
+      status: async id => ({ ...await engine.permissionStatus(id), approvalPolicy: [...states].find(([agent]) => agent.id === id)?.[1].approvalPolicy ?? nativeApproval?.config?.policy ?? 'ask' }),
       forget: id => engine.forget(id),
+      answerManual: request => engine.answerManual(request),
     });
     const { installManagementApi } = await import('./management-api.js');
     await installManagementApi(apiCtx, manager);
@@ -86,7 +94,7 @@ export function apply(ctx: Context, options: Options = {}): void {
   const stateOf = (agent: Agent): State => {
     let state = states.get(agent);
     if (!state) {
-      state = { source: 'resume', started: false, turn: 0, continued: 0, last: null, model: agent.options?.model ?? '', continuationIds: new Set(), approvalPolicy: ctx.approval.config?.policy ?? 'ask' };
+      state = { source: 'resume', started: false, turn: 0, continued: 0, last: null, model: agent.options?.model ?? '', continuationIds: new Set(), approvalPolicy: nativeApproval?.config?.policy ?? 'ask' };
       states.set(agent, state); bySession.set(agent.session, agent);
       for (const event of agent.session.snapshotEvents()) fold(state, event);
     }
@@ -171,6 +179,8 @@ export function apply(ctx: Context, options: Options = {}): void {
   });
   ctx.on('agent/created', async ({ agent, source }: { agent: Agent; source: string }) => {
     await closing.get(agent.id); const state = stateOf(agent); state.source = source; state.started = false;
+    const cwd = state.cwd ?? agent.session.header.cwd;
+    if (cwd) { state.cwd = cwd; engine.attach(agent.id, cwd); }
   });
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     const agent = bySession.get(session); if (!agent) return;

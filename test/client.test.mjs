@@ -125,13 +125,24 @@ test('revoke is single-shot and a session change ignores old completion', async 
     await view.render('s2'); assert(!dialog()); await act(async () => finish({ ok: true, value: { revoked: true } })); assert(!dialog());
   } finally { await view.cleanup(); }
 });
-test('full-access policy displays a read-only skipped notice without granting permission or hiding the editor', async () => {
+test('legacy hosts without a manual review token keep the skipped notice read-only', async () => {
   listOverride = async () => ({ ok: true, value: { requests: [], status: { cwd: '/repo', fingerprint: 'a'.repeat(64), hooks: request().hooks, session: false, permanent: false, approvalPolicy: 'never' } } });
   const view = await mount([]); try {
     assert(button('Hooks 已跳过')); await click('Hooks 已跳过'); assert(dialog().textContent.includes('当前模式关闭了审批'));
     assert(dialog().textContent.includes('node ./guard.mjs')); assert(!button('永久允许')); assert(!button('本会话允许')); assert.equal(answers.length, 0);
     await click('关闭'); assert.equal(view.container.querySelector('textarea').value, 'kept draft');
   } finally { await view.cleanup(); }
+});
+test('skipped hooks with an owner review token expose session/permanent/deny actions without a mode switch', async () => {
+  for (const [label, decision] of [['本会话允许', 'allow-session'], ['永久允许', 'allow-permanent'], ['拒绝', 'deny']]) {
+    const review = request({ manual: true, id: 'manual:review-1' });
+    listOverride = async () => ({ ok: true, value: { requests: [], status: { session: false, approvalPolicy: 'never', review } } });
+    const view = await mount([]); try {
+      await click('Hooks 已跳过'); assert(button('本会话允许')); assert(button('永久允许')); assert(button('拒绝'));
+      assert(dialog().textContent.includes('手动授权从后续事件生效')); await click(label);
+      assert.equal(answers.length, 1); assert.equal(answers[0].id, review.id); assert.equal(answers[0].decision, decision); assert(!dialog());
+    } finally { await view.cleanup(); }
+  }
 });
 test('invalid configuration has a compact repair notice and no executable approval controls', async () => {
   listOverride = async () => ({ ok: true, value: { requests: [], status: { problem: 'hooks.json: invalid JSON', session: false } } });

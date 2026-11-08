@@ -52,7 +52,7 @@ interface Agent {
 }
 interface Context {
     shell: Shell;
-    approval: {
+    approval?: {
         config?: {
             policy?: 'ask' | 'never';
         };

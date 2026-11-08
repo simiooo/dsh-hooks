@@ -55,6 +55,11 @@ test('a declined session does not silently inherit a later permanent decision ma
   await f.grant(f.make()); assert.equal((await f.run(declined)).block, true);
   declined.attach('new', f.dir); assert.equal((await f.run(declined, 'new')).block, false);
 });
+test('a skipped independent session inherits a matching global grant made later and status stops offering approval', async t => {
+  const f = await fixture(t), skipped = f.make(async () => 'deferred'); assert.equal((await f.run(skipped)).block, true);
+  await f.grant(f.make()); const status = await skipped.permissionStatus('s'); assert.equal(status.session, true); assert.equal(status.permanent, true); assert.equal(status.review, undefined);
+  assert.equal((await f.run(skipped)).block, false);
+});
 test('global revocation removes the durable record and cancels every attached session in that directory', async t => {
   const f = await fixture(t); const e = f.make(); await f.grant(e); e.attach('second', f.dir); await f.run(e); await f.run(e, 'second');
   await e.forget('s'); assert.equal((await e.permissionStatus('s')).permanent, false);
@@ -86,4 +91,43 @@ test('cancel during the final commit removes the cancelled grant; pre-commit can
   assert.deepEqual(await readdir(join(f.data, 'permissions')), []);
   checks = 0; await assert.rejects(trust.remember(f.dir, next, next, async () => { if (++checks > 1) throw new Error('invalid configuration'); return true; }));
   assert.equal(await trust.get(f.dir), undefined);
+});
+test('idle owner decisions support session, permanent and deny without an open native approval request', async t => {
+  for (const decision of ['allow-session', 'allow-permanent', 'deny']) {
+    const f = await fixture(t), e = f.make(); await f.run(e);
+    const { review } = await e.permissionStatus('s'); assert(review.manual); assert.match(review.id, /^manual:/);
+    const answer = { sessionId: 's', id: review.id, fingerprint: review.fingerprint, decision };
+    assert.equal(await e.answerManual(answer), true); assert.equal(await e.answerManual(answer), false);
+    const reviews = f.reviews.length; const out = await f.run(e);
+    assert.equal(out.block, decision === 'deny'); if (decision !== 'deny') assert.equal(f.reviews.length, reviews);
+    assert.equal((await f.run(f.make())).block, decision !== 'allow-permanent');
+    const files = await readdir(join(f.data, 'permissions', 'audit')); assert.equal(files.length, 1);
+    const audit = JSON.parse(await readFile(join(f.data, 'permissions', 'audit', files[0]), 'utf8'));
+    assert.equal(audit.actor, 'interactive-host-owner'); assert.equal(audit.phase, 'requested'); assert.equal(audit.decision, decision); assert.equal(audit.reviewId, review.id);
+  }
+});
+test('manual decisions reject wrong session/version, revoked tokens, changes and closed lifetimes', async t => {
+  const f = await fixture(t), e = f.make(); const { review } = await e.permissionStatus('s');
+  const answer = { sessionId: 's', id: review.id, fingerprint: review.fingerprint, decision: 'allow-permanent' };
+  assert.equal(await e.answerManual({ ...answer, sessionId: 'other' }), false); assert.equal(await e.answerManual({ ...answer, fingerprint: '0'.repeat(64) }), false);
+  e.revoke('s'); assert.equal(await e.answerManual(answer), false);
+  const current = (await e.permissionStatus('s')).review; assert.notEqual(current.id, review.id);
+  await writeFile(f.script, 'changed before manual approval'); assert.equal(await e.answerManual({ ...answer, id: current.id }), false);
+  const latest = (await e.permissionStatus('s')).review; await e.dispose(); assert.equal(await e.answerManual({ ...answer, id: latest.id, fingerprint: latest.fingerprint }), false);
+  assert.equal(f.calls.length, 0);
+});
+test('manual duplicate submissions share no implicit grant and create just one durable owner intent', async t => {
+  const f = await fixture(t), e = f.make(); const { review } = await e.permissionStatus('s');
+  const answer = { sessionId: 's', id: review.id, fingerprint: review.fingerprint, decision: 'allow-session' };
+  const results = await Promise.allSettled([e.answerManual(answer), e.answerManual(answer)]);
+  assert.equal(results[0].status, 'fulfilled'); assert.equal(results[0].value, true);
+  assert.equal(results[1].status, 'rejected'); assert.match(results[1].reason.message, /already being saved/);
+  assert.equal((await readdir(join(f.data, 'permissions', 'audit'))).length, 1);
+});
+test('manual audit failure leaves hooks unapproved and the same review can explicitly retry after storage repair', async t => {
+  const f = await fixture(t), bad = join(f.dir, 'bad-store'); await writeFile(bad, 'file');
+  const e = f.make(undefined, { permissionsDir: bad }), { review } = await e.permissionStatus('s');
+  const answer = { sessionId: 's', id: review.id, fingerprint: review.fingerprint, decision: 'allow-permanent' };
+  await assert.rejects(e.answerManual(answer)); assert.equal((await f.run(e)).block, true);
+  await rm(bad); await mkdir(bad); assert.equal(await e.answerManual(answer), true); assert.equal((await f.run(e)).block, false);
 });

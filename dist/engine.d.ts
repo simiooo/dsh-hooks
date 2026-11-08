@@ -32,7 +32,14 @@ export interface PermissionRequest {
         statusMessage?: string;
     }[];
 }
-export type Authorize = (request: PermissionRequest, signal: AbortSignal) => Promise<boolean>;
+export type Authorize = (request: PermissionRequest, signal: AbortSignal) => Promise<boolean | 'deferred'>;
+export type HookDecision = 'allow-session' | 'allow-permanent' | 'deny';
+export interface ManualAnswer {
+    sessionId: string;
+    id: string;
+    fingerprint: string;
+    decision: HookDecision;
+}
 /** Protocol engine; processes use the Harness shell and immutable session/revision lifetimes. */
 export declare class HooksEngine {
     private shell;
@@ -60,10 +67,23 @@ export declare class HooksEngine {
         session: boolean;
         permanent: boolean;
         cwd?: never;
-        fingerprint?: never;
-        hooks?: never;
         problem?: never;
     } | {
+        review?: {
+            schema: "dsh-hooks/approval-v1";
+            scope: "session";
+            sessionId: string;
+            cwd: string;
+            fingerprint: string;
+            hooks: {
+                statusMessage?: string;
+                event: "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PreCompact" | "PostCompact" | "Stop" | "Interrupt" | "SessionEnd";
+                command: string;
+                source: string;
+            }[];
+            id: string;
+            manual: true;
+        };
         cwd: string;
         session: boolean;
         permanent: boolean;
@@ -80,9 +100,8 @@ export declare class HooksEngine {
         session: boolean;
         permanent: boolean;
         problem: string;
-        fingerprint?: never;
-        hooks?: never;
     }>;
+    answerManual(request: ManualAnswer): Promise<boolean>;
     forget(id: string): Promise<void>;
     stopWork(id: string): void;
     retainContexts(id: string, outcome: Outcome): void;

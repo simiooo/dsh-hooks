@@ -6,6 +6,7 @@ import { sha, type Options } from './config.js';
 import { object } from './protocol.js';
 
 export interface Grant { schema: 'dsh-hooks/trust-v1'; id: string; cwd: string; fingerprint: string; policy: string; grantedAt: string }
+interface OwnerDecision { cwd: string; sessionId: string; fingerprint: string; id: string; decision: string }
 /** Independent records avoid losing another directory's grant during concurrent profile writes. */
 export class PermanentTrust {
   private tail: Promise<unknown> = Promise.resolve();
@@ -56,6 +57,22 @@ export class PermanentTrust {
     return this.serialize(async () => {
       try { await unlink(this.path(await this.scope(cwd))); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    });
+  }
+  /** Records the owner's explicit intent; only a matching live engine or durable grant can execute it. */
+  async recordDecision(request: OwnerDecision, current: () => Promise<boolean>): Promise<void> {
+    return this.serialize(async () => {
+      const directory = join(this.directory, 'audit'), id = randomUUID(), path = join(directory, `${id}.json`), temporary = `${path}.tmp`;
+      const record = { schema: 'dsh-hooks/owner-decision-v1', id, actor: 'interactive-host-owner', phase: 'requested', at: new Date().toISOString(),
+        cwd: await this.scope(request.cwd), sessionId: request.sessionId, fingerprint: request.fingerprint, reviewId: request.id, decision: request.decision };
+      const valid = async () => { try { return await current(); } catch { return false; } };
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      try {
+        await writeFile(temporary, JSON.stringify(record, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+        if (!await valid()) throw new Error('Hook review changed. Reopen it before approving.');
+        await rename(temporary, path);
+        if (!await valid()) { await unlink(path); throw new Error('Hook review was withdrawn.'); }
+      } finally { await unlink(temporary).catch(() => {}); }
     });
   }
 }

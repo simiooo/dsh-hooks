@@ -87,6 +87,7 @@ export class HooksEngine {
         state.permanent = false;
         state.contexts.length = 0;
         state.queued.length = 0;
+        delete state.manual;
         state.revision.abort(new Error(reason));
         state.pending?.controller.abort(new Error(reason));
         state.revision = new AbortController();
@@ -173,9 +174,9 @@ export class HooksEngine {
             entry.promise = (async () => {
                 try {
                     const allowed = await abortable(Promise.resolve().then(() => { approvalSignal.throwIfAborted(); return this.authorize(request, approvalSignal); }), approvalSignal);
-                    if (!allowed && !approvalSignal.aborted && this.valid(state, revision))
+                    if (allowed === false && !approvalSignal.aborted && this.valid(state, revision))
                         state.ignorePermanent = true;
-                    if (!allowed || approvalSignal.aborted || !this.valid(state, revision))
+                    if (allowed !== true || approvalSignal.aborted || !this.valid(state, revision))
                         return false;
                     await abortable(this.refresh(id), approvalSignal);
                     if (approvalSignal.aborted || !this.valid(state, revision))
@@ -247,11 +248,62 @@ export class HooksEngine {
             return { session: false, permanent: false };
         try {
             const snapshot = await this.refresh(id);
-            return { cwd: state.cwd, session: state.approved === state.epoch, permanent: await this.trusted(state.cwd, snapshot), fingerprint: snapshot.fingerprint,
-                hooks: snapshot.hooks.map(({ event, command, source, statusMessage }) => ({ event, command, source, ...(statusMessage ? { statusMessage } : {}) })) };
+            const hooks = snapshot.hooks.map(({ event, command, source, statusMessage }) => ({ event, command, source, ...(statusMessage ? { statusMessage } : {}) }));
+            const epoch = state.epoch, permanent = await this.trusted(state.cwd, snapshot);
+            if (state.closed || state.snapshot !== snapshot || state.epoch !== epoch)
+                return { session: false, permanent: false };
+            if (permanent && !state.ignorePermanent) {
+                state.approved = epoch;
+                state.permanent = true;
+            }
+            const session = state.approved === state.epoch;
+            if (!session && hooks.length && !state.manual)
+                state.manual = { id: `manual:${randomUUID()}`, epoch: state.epoch, fingerprint: snapshot.fingerprint, busy: false };
+            const review = !session && state.manual ? { schema: 'dsh-hooks/approval-v1', scope: 'session', sessionId: id, cwd: state.cwd,
+                fingerprint: snapshot.fingerprint, hooks, id: state.manual.id, manual: true } : undefined;
+            return { cwd: state.cwd, session, permanent, fingerprint: snapshot.fingerprint, hooks, ...(review ? { review } : {}) };
         }
         catch (error) {
             return { cwd: state.cwd, session: false, permanent: false, problem: String(error) };
+        }
+    }
+    async answerManual(request) {
+        const state = this.sessions.get(request.sessionId), review = state?.manual;
+        if (!state || !review || review.id !== request.id || review.fingerprint !== request.fingerprint || !['allow-session', 'allow-permanent', 'deny'].includes(request.decision))
+            return false;
+        if (review.busy)
+            throw new Error('Hook review is already being saved. Try again.');
+        const epoch = review.epoch, signal = AbortSignal.any([state.revision.signal, state.life.signal, this.lifetime.signal]);
+        const current = async () => {
+            if (signal.aborted || state.closed || state.manual !== review || state.epoch !== epoch)
+                return false;
+            const snapshot = await this.refresh(request.sessionId);
+            return !signal.aborted && !state.closed && state.manual === review && state.epoch === epoch && snapshot.fingerprint === request.fingerprint;
+        };
+        review.busy = true;
+        try {
+            if (!await current())
+                return false;
+            const snapshot = state.snapshot, cwd = state.cwd;
+            await this.trust.recordDecision({ ...request, cwd }, current);
+            if (!await current())
+                return false;
+            if (request.decision === 'deny')
+                this.revoke(request.sessionId);
+            else {
+                if (request.decision === 'allow-permanent')
+                    await this.remember({ schema: 'dsh-hooks/approval-v1', scope: 'session', sessionId: request.sessionId, cwd, fingerprint: snapshot.fingerprint, hooks: [] }, signal);
+                if (!await current())
+                    return false;
+                state.approved = epoch;
+                state.permanent = request.decision === 'allow-permanent';
+                if (state.manual === review)
+                    delete state.manual;
+            }
+            return true;
+        }
+        finally {
+            review.busy = false;
         }
     }
     async forget(id) {

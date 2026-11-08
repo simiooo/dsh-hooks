@@ -7,6 +7,13 @@ export interface Grant {
     policy: string;
     grantedAt: string;
 }
+interface OwnerDecision {
+    cwd: string;
+    sessionId: string;
+    fingerprint: string;
+    id: string;
+    decision: string;
+}
 /** Independent records avoid losing another directory's grant during concurrent profile writes. */
 export declare class PermanentTrust {
     private tail;
@@ -18,4 +25,7 @@ export declare class PermanentTrust {
     private serialize;
     remember(cwd: string, fingerprint: string, policy: string, current: () => Promise<boolean>): Promise<void>;
     forget(cwd: string): Promise<void>;
+    /** Records the owner's explicit intent; only a matching live engine or durable grant can execute it. */
+    recordDecision(request: OwnerDecision, current: () => Promise<boolean>): Promise<void>;
 }
+export {};

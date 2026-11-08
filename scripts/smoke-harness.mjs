@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import * as Plugin from '../dist/index.js';
@@ -59,23 +59,23 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   const invoke = (method, request, caller = peer) => ctx.typertGateway.invoke({ namespace: 'dshHooksPermissions', method, args: { request }, peer: caller });
   const manage = (method, request, caller = peer) => ctx.typertGateway.invoke({ namespace: 'dshHooksManagement', method, args: { request }, peer: caller });
   const asks = [];
-  let answering = false, pollingPaused = false;
-  const answerTimer = setInterval(async () => {
-    if (answering || pollingPaused || !ctx.get('dshHooksPermissions')) return;
-    answering = true;
-    try {
-      for (const sid of ['hooks-smoke', 'hooks-persistent', 'hooks-after-revoke', 'hooks-never', 'hooks-never-trusted']) for (const request of (await invoke('list', { sessionId: sid })).requests) {
+  const reviewSession = async (sid, selected = 'allow-session') => {
+      let listed;
+      const deadline = Date.now() + 3000;
+      while (!listed) {
+        try { listed = await invoke('list', { sessionId: sid }); }
+        catch (error) { if (error.code !== 'gateway/invocation-unavailable' || Date.now() > deadline) throw error; await new Promise(resolve => setTimeout(resolve, 5)); }
+      }
+      const request = listed.status.review;
+      assert(request?.manual, 'Owner review must exist independently of native tool approval');
         asks.push(request);
         assert.equal((await invoke('answer', { sessionId: 'other', id: request.id, fingerprint: request.fingerprint, decision: 'allow-session' })).accepted, false);
         assert.equal((await invoke('answer', { sessionId: request.sessionId, id: request.id, fingerprint: '0'.repeat(64), decision: 'allow-session' })).accepted, false);
         assert.equal((await invoke('answer', { sessionId: request.sessionId, id: request.id, fingerprint: '0'.repeat(64), decision: 'allow-permanent' })).accepted, false);
-        const decision = { sessionId: request.sessionId, id: request.id, fingerprint: request.fingerprint, decision: [2, 4].includes(asks.length) ? 'allow-permanent' : 'allow-session' };
+        const decision = { sessionId: request.sessionId, id: request.id, fingerprint: request.fingerprint, decision: selected };
         assert.equal((await invoke('answer', decision)).accepted, true);
         assert.equal((await invoke('answer', decision)).accepted, false);
-      }
-    } finally { answering = false; }
-  }, 25);
-  ctx.effect(() => () => clearInterval(answerTimer));
+  };
   const adapter = new Adapter([{ name: 'echo', args: { text: 'blocked', nested: { count: 7 } } }, { name: 'echo', args: { text: 'allowed' } }, 'first', 'continued', 'after reload', 'continued again']);
   ctx.llm.registerAdapter(['mock'], adapter);
   const executions = [];
@@ -84,6 +84,7 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   let hooksFiber = ctx.plugin(Plugin, pluginOptions);
   await hooksFiber;
   const agent = await ctx.agentLoop.create(session.SessionId('hooks-smoke'), { provider: 'mock', model: 'mock' }, { cwd: dir });
+  await reviewSession('hooks-smoke');
   const send = value => agent.followup(llm.createUserMessage({ content: [{ type: 'text', text: value }], source: { kind: 'user' } }));
   send('test hook gates'); await agent.whenIdle();
   assert.deepEqual(executions, ['allowed'], 'only the allowed call executes'); assert.equal(asks.length, 1);
@@ -108,13 +109,15 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert.notEqual(saved.revision, enabled.revision);
   // Script-only change: next turn asks again, with no plugin or agent restart.
   await writeFile(scriptPath, (await readFile(scriptPath, 'utf8')) + '\n// changed revision\n');
+  await reviewSession('hooks-smoke', 'allow-permanent');
   send('test reload'); await agent.whenIdle(); assert.equal(asks.length, 2);
   rows = (await readFile(capture, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(rows.filter(r => r.hook_event_name === 'Stop').map(r => r.stop_hook_active), [false, true, false, true]);
   assert.equal(adapter.requests.length, 6);
   assert.notEqual(asks[0].fingerprint, asks[1].fingerprint);
   const decisions = agent.session.snapshotEvents().filter(e => e.type === 'approval/decided');
-  assert.equal(decisions.length, 2); assert(decisions.every(e => e.data.outcome === 'allowed-once'));
+  assert.equal(decisions.length, 0, 'Web/desktop hooks never ask the native tool approval service');
+  assert.equal((await readdir(join(dir, 'state/permissions/audit'))).length, 2);
   const noInteraction = new Peer(ctx, { principal: { kind: 'owner' }, interactions: 'none' });
   await assert.rejects(invoke('list', { sessionId: 'hooks-smoke' }, noInteraction), /interactive Host owner/);
   await assert.rejects(manage('catalog', {}, noInteraction), /interactive Host owner/);
@@ -126,10 +129,7 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   }
   assert.equal((await invoke('status', { sessionId: 'hooks-smoke' })).permanent, true);
   // Cold plugin restart: only the durable record can authorize a new session.
-  pollingPaused = true;
-  while (answering) await new Promise(resolve => setTimeout(resolve, 5));
   await hooksFiber.dispose(); hooksFiber = ctx.plugin(Plugin, pluginOptions); await hooksFiber;
-  pollingPaused = false;
   const persistent = await ctx.agentLoop.create(session.SessionId('hooks-persistent'), { provider: 'mock', model: 'mock' }, { cwd: dir });
   adapter.script.push('saved permission', 'saved continuation');
   persistent.followup(llm.createUserMessage({ content: [{ type: 'text', text: 'after restart' }], source: { kind: 'user' } }));
@@ -138,6 +138,7 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   await invoke('forget', { sessionId: 'hooks-persistent' });
   assert.equal((await invoke('status', { sessionId: 'hooks-persistent' })).permanent, false);
   const untrusted = await ctx.agentLoop.create(session.SessionId('hooks-after-revoke'), { provider: 'mock', model: 'mock' }, { cwd: dir });
+  await reviewSession('hooks-after-revoke');
   adapter.script.push('after revoke', 'after revoke continuation');
   untrusted.followup(llm.createUserMessage({ content: [{ type: 'text', text: 'review again' }], source: { kind: 'user' } }));
   await untrusted.whenIdle(); assert.equal(asks.length, 3, 'new session must ask again after permanent revocation');
@@ -158,8 +159,27 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert(JSON.stringify(adapter.requests.at(-1)).includes('must reach model in full access mode'));
   assert.equal((await readFile(capture, 'utf8')).trim().split('\n').length, hooksBeforeNever, 'unapproved hooks must not run');
   const skipped = await invoke('list', { sessionId: 'hooks-never' }); assert.equal(skipped.requests.length, 0); assert.equal(skipped.status.approvalPolicy, 'never'); assert.equal(skipped.status.session, false);
+  const manual = skipped.status.review; assert(manual?.manual);
+  const ownerDecision = { sessionId: 'hooks-never', id: manual.id, fingerprint: manual.fingerprint, decision: 'allow-session' };
+  await assert.rejects(invoke('answer', ownerDecision, guest)); await assert.rejects(invoke('answer', ownerDecision, noInteraction));
+  assert.equal((await invoke('answer', ownerDecision)).accepted, true); assert.equal((await invoke('answer', ownerDecision)).accepted, false);
+  assert.equal((await readFile(capture, 'utf8')).trim().split('\n').length, hooksBeforeNever, 'manual approval must not replay skipped hooks');
+  const nativeAsks = never.session.snapshotEvents().filter(event => event.type === 'approval/asked').length;
+  const beforeManual = adapter.requests.length; adapter.script.push('manual full access', 'manual full access continuation');
+  never.followup(llm.createUserMessage({ content: [{ type: 'text', text: 'after explicit owner approval' }], source: { kind: 'user' } }));
+  await never.whenIdle(); assert.equal(adapter.requests.length, beforeManual + 2);
+  assert.equal(never.session.snapshotEvents().filter(event => event.type === 'approval/asked').length, nativeAsks);
+  assert.equal((await invoke('status', { sessionId: 'hooks-never' })).approvalPolicy, 'never');
+  await invoke('revoke', { sessionId: 'hooks-never' }); assert.equal((await invoke('answer', ownerDecision)).accepted, false);
+  const denyReview = (await invoke('list', { sessionId: 'hooks-never' })).status.review;
+  assert.equal((await invoke('answer', { ...ownerDecision, id: denyReview.id, decision: 'deny' })).accepted, true);
+  assert.equal((await invoke('status', { sessionId: 'hooks-never' })).session, false);
+  const permanentReview = (await invoke('list', { sessionId: 'hooks-never' })).status.review;
+  assert.equal((await invoke('answer', { ...ownerDecision, id: permanentReview.id, decision: 'allow-permanent' })).accepted, true);
+  assert.equal((await invoke('status', { sessionId: 'hooks-never' })).permanent, true);
+  assert.equal((await invoke('status', { sessionId: 'hooks-never' })).approvalPolicy, 'never');
   // Explicitly approve under ask, then reuse the saved decision under never.
-  await invoke('revoke', { sessionId: 'hooks-after-revoke' }); adapter.script.push('review permanent again', 'review continuation');
+  await invoke('revoke', { sessionId: 'hooks-after-revoke' }); await reviewSession('hooks-after-revoke', 'allow-permanent'); adapter.script.push('review permanent again', 'review continuation');
   untrusted.followup(llm.createUserMessage({ content: [{ type: 'text', text: 'save permanent' }], source: { kind: 'user' } }));
   await untrusted.whenIdle(); assert.equal(asks.length, 4);
   const neverTrusted = await ctx.agentLoop.create(session.SessionId('hooks-never-trusted'), { provider: 'mock', model: 'mock' }, { cwd: dir });
@@ -191,10 +211,8 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert.equal(slots.entriesOfSlot('plugins.detail.section').length, 1);
   assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksManagement').length, 4);
   removeRoot();
-  pollingPaused = true;
-  while (answering) await new Promise(resolve => setTimeout(resolve, 5));
   await hooksFiber.dispose();
   rows = (await readFile(capture, 'utf8')).trim().split('\n').map(JSON.parse);
   assert(rows.some(row => row.hook_event_name === 'SessionEnd'), 'approved cleanup must run on plugin unload');
-  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'native approval audit', 'real Typert Gateway permission API', 'cross-session, wrong-fingerprint and duplicate answer rejection', 'non-interactive peer rejection', 'session revocation', 'durable approval + cold plugin restart + new session without prompt', 'global revocation + fresh session asks again', 'owner-only status/forget API', 'full-access never policy sends chat without running unapproved hooks', 'same-session temporary grant survives full-access switch', 'permanent grant reused under never policy', 'full non-shell arguments', 'tool deny', 'first-request context', 'PostToolUse replacement with model continuation', 'Stop continuation state and text', 'script hot reload and renewed permission', 'real management read/write, switches and stale revision rejection', 'management guest and non-interactive peer rejection', 'native permission/detail SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
+  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'independent Owner audit without native tool approval', 'real Typert Gateway permission API', 'cross-session, wrong-fingerprint and duplicate answer rejection', 'non-interactive peer rejection', 'session revocation', 'durable approval + cold plugin restart + new session without prompt', 'global revocation + fresh session asks again', 'owner-only status/forget and idle manual session/permanent/deny under never', 'full-access never policy sends chat without running unapproved hooks', 'same-session temporary grant survives full-access switch', 'permanent grant reused under never policy', 'full non-shell arguments', 'tool deny', 'first-request context', 'PostToolUse replacement with model continuation', 'Stop continuation state and text', 'script hot reload and renewed permission', 'real management read/write, switches and stale revision rejection', 'management guest and non-interactive peer rejection', 'native permission/detail SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
 } finally { await ctx.fiber.dispose(); protocolResolution.deregister(); await rm(dir, { recursive: true, force: true }); }
