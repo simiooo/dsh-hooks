@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { mkdtemp, writeFile, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import assert from 'node:assert/strict';
 import * as Plugin from '../dist/index.js';
@@ -189,6 +189,12 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   await neverTrusted.whenIdle(); assert.equal(adapter.requests.length, beforeTrusted + 2); assert.equal(asks.length, 4);
   assert.equal((await invoke('status', { sessionId: 'hooks-never-trusted' })).permanent, true);
   await invoke('forget', { sessionId: 'hooks-never-trusted' });
+  const staleDirectoryReview = (await invoke('list', { sessionId: 'hooks-never' })).status.review;
+  const anotherDirectory = join(dir, 'another-directory'); await mkdir(anotherDirectory);
+  never.session.append('working-directory/change', { cwd: anotherDirectory });
+  assert.equal((await invoke('answer', { sessionId: 'hooks-never', id: staleDirectoryReview.id, fingerprint: staleDirectoryReview.fingerprint, decision: 'allow-permanent' })).accepted, false);
+  assert.equal((await invoke('status', { sessionId: 'hooks-never' })).cwd, anotherDirectory);
+  never.session.append('working-directory/change', { cwd: dir });
   const { SlotCore } = await hostImport('@deepseek-ai/dsh-client-ui-slots');
   const slots = new SlotCore();
   const removeRoot = slots.register({ name: 'root', children: {

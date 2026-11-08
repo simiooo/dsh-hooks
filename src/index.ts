@@ -185,6 +185,7 @@ export function apply(ctx: Context, options: Options = {}): void {
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     const agent = bySession.get(session); if (!agent) return;
     const state = stateOf(agent); fold(state, event);
+    if (event.type === 'working-directory/change' && state.cwd && !state.closing && !lifetime.signal.aborted) engine.attach(agent.id, state.cwd);
     if (event.type === 'compaction/end' && event.data.error === undefined && !state.closing) {
       // Remember the committed lifecycle even when PostCompact stops or cancellation prevents its callback.
       state.source = 'compact'; state.started = false;
