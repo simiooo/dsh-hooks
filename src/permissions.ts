@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { EVENTS, object } from './protocol.js';
 import type { PermissionRequest, ManualAnswer } from './engine.js';
+import type { PermissionChoice } from './policy.js';
 
 export function isPermissionRequest(value: unknown): value is PermissionRequest {
   return object(value) && value.schema === 'dsh-hooks/approval-v1' && value.scope === 'session'
@@ -18,6 +19,7 @@ interface PermissionActions {
   status(sessionId: string): Promise<unknown>;
   forget(sessionId: string): Promise<void>;
   answerManual(request: ManualAnswer): Promise<boolean>;
+  setRule(sessionId: string, revision: string, id: string, choice: PermissionChoice): Promise<unknown>;
 }
 type Decision = 'allow-session' | 'allow-permanent' | 'deny';
 export async function installPermissionApi(ctx: any, actions: PermissionActions): Promise<void> {
@@ -66,6 +68,14 @@ export async function installPermissionApi(ctx: any, actions: PermissionActions)
     @Remote({ resources })
     async forget(request: unknown) {
       this.owner(); await actions.forget(sessionId(request)); return { revoked: true };
+    }
+    @Remote({ resources })
+    setRule(request: unknown) {
+      this.owner(); const sid = sessionId(request);
+      if (!object(request) || Object.keys(request).some(key => !['sessionId', 'revision', 'id', 'choice'].includes(key))
+        || typeof request.revision !== 'string' || !/^[a-f0-9]{64}$/.test(request.revision)
+        || typeof request.id !== 'string' || !/^[a-f0-9]{64}$/.test(request.id) || !['inherit', 'allow', 'deny'].includes(String(request.choice))) throw new TypeError('Invalid session hook permission');
+      return actions.setRule(sid, request.revision, request.id, request.choice as PermissionChoice);
     }
   }
   new HooksPermissions();

@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto';
 import { loadSnapshot, sha, type Options, type Snapshot } from './config.js';
 import { decode, emptyOutcome, matches, merge, type EventName, type Hook, type Outcome } from './protocol.js';
 import { PermanentTrust } from './trust.js';
+import { HookPermissions } from './hierarchy.js';
+import type { PermissionChoice } from './policy.js';
 
 export interface ShellResult {
   exitCode: number | null; timedOut?: boolean; aborted?: boolean;
@@ -31,7 +33,7 @@ interface SessionState {
   approved?: number | undefined; permanent?: boolean; ignorePermanent?: boolean; refresh?: Promise<Snapshot>; pending?: PendingApproval;
   manual?: ManualReview;
   active: Set<Promise<unknown>>; queued: (() => void)[]; background: number;
-  contexts: { revision: number; text: string }[];
+  contexts: { revision: number; text: string; token?: string }[];
 }
 interface Revision { epoch: number; cwd: string; snapshot: Snapshot; signal: AbortSignal }
 
@@ -54,6 +56,7 @@ export class HooksEngine {
   private disposal: Promise<void> | undefined;
   readonly options: Readonly<Options>;
   private trust: PermanentTrust;
+  private hierarchy: HookPermissions | undefined;
   constructor(private shell: Shell, private authorize: Authorize, options: Options = {}, private log: (message: string) => void = () => {}) {
     const copy = structuredClone(options);
     for (const [key, value] of Object.entries(copy)) {
@@ -68,6 +71,29 @@ export class HooksEngine {
     this.options = Object.freeze(copy);
     this.trust = new PermanentTrust(this.options);
   }
+  /** The plugin uses per-hook policies; the old standalone engine API remains compatible. */
+  enableHierarchy(): void {
+    if (this.lifetime.signal.aborted) throw new Error('hooks engine disposed');
+    this.hierarchy ??= new HookPermissions(this.options, (cwd, snapshot) => this.trusted(cwd, snapshot), () => !this.lifetime.signal.aborted);
+    for (const [id, state] of this.sessions) this.hierarchy.attach(id, state.cwd);
+  }
+  async policyCatalog(cwd: string, snapshot: Snapshot) { this.enableHierarchy(); return this.hierarchy!.catalog(cwd, snapshot); }
+  private async refreshPolicies(): Promise<void> {
+    for (const state of this.sessions.values()) { delete state.manual; state.pending?.controller.abort(new Error('Hook policies changed')); state.approved = undefined; }
+    await Promise.allSettled([...this.sessions.keys()].map(id => this.refresh(id)));
+  }
+  async setPolicy(cwd: string, snapshot: Snapshot, expected: string, scope: 'global' | 'project', key: string, choice: PermissionChoice, current: () => Promise<boolean>) {
+    this.enableHierarchy(); await this.hierarchy!.setDurable(cwd, snapshot, expected, scope, key, choice, current); await this.refreshPolicies();
+  }
+  async setDefaultPolicy(cwd: string, snapshot: Snapshot, expected: string, enabled: boolean, current: () => Promise<boolean>) {
+    this.enableHierarchy(); await this.hierarchy!.setDefault(cwd, snapshot, expected, enabled, current); await this.refreshPolicies();
+  }
+  async setSessionPolicy(id: string, revision: string, key: string, choice: PermissionChoice) {
+    if (!this.hierarchy) throw new Error('Hook permission management is unavailable');
+    const result = await this.hierarchy.setSession(id, revision, key, choice);
+    const state = this.state(id); delete state.manual; state.approved = undefined; state.pending?.controller.abort(new Error('Session hook policies changed'));
+    return result;
+  }
   start(): void {
     if (this.lifetime.signal.aborted) throw new Error('hooks engine disposed');
     if (this.interval) return;
@@ -78,6 +104,7 @@ export class HooksEngine {
   }
   attach(id: string, cwd: string): void {
     if (this.lifetime.signal.aborted) throw new Error('hooks engine disposed');
+    this.hierarchy?.attach(id, cwd);
     const old = this.sessions.get(id);
     if (old && !old.closed) {
       if (old.cwd !== cwd) { old.cwd = cwd; this.invalidate(old, 'session directory changed'); }
@@ -89,7 +116,8 @@ export class HooksEngine {
     const state = this.sessions.get(id); if (!state) throw new Error(`hooks session not attached: ${id}`); return state;
   }
   private invalidate(state: SessionState, reason: string): void {
-    state.epoch++; state.approved = undefined; state.permanent = false; state.contexts.length = 0; state.queued.length = 0;
+    state.epoch++; state.approved = undefined; state.permanent = false;
+    if (!this.hierarchy) { state.contexts.length = 0; state.queued.length = 0; }
     delete state.manual;
     state.revision.abort(new Error(reason)); state.pending?.controller.abort(new Error(reason));
     state.revision = new AbortController();
@@ -112,11 +140,13 @@ export class HooksEngine {
           }
           delete state.error;
           if (state.permanent && !await this.trusted(cwd, snapshot)) this.invalidate(state, 'permanent hook permission revoked');
+          if (this.hierarchy) await this.hierarchy.sync(id, snapshot);
           return state.snapshot!;
         } catch (error) {
           if (state.closed) throw error;
           if (cwd !== state.cwd) continue;
           const message = error instanceof Error ? error : new Error(String(error));
+          this.hierarchy?.stop(id);
           if (state.error?.message !== message.message) this.log(`Hooks configuration rejected: ${message.message}`);
           state.error = message; this.invalidate(state, message.message); throw message;
         }
@@ -174,9 +204,11 @@ export class HooksEngine {
       if (!pending.waiters && !pending.settled) pending.controller.abort(new Error('no active hook permission waiters'));
     }
   }
-  revoke(id: string): void { const state = this.sessions.get(id); if (state && !state.closed) { state.ignorePermanent = true; this.invalidate(state, 'hook permission revoked'); } }
+  revoke(id: string): void { this.hierarchy?.revoke(id); const state = this.sessions.get(id); if (state && !state.closed) { state.ignorePermanent = true; this.invalidate(state, 'hook permission revoked'); } }
   private policy(snapshot: Snapshot): string {
-    return sha(JSON.stringify([snapshot.fingerprint, snapshot.hooks, this.options.shellFlavor ?? process.platform,
+    // Keep the 0.4.x execution-policy wire shape when validating an existing directory grant.
+    const hooks = snapshot.hooks.map(({ permissionId: _identity, version: _version, legacyControlId, ...hook }) => ({ ...hook, id: legacyControlId ?? hook.id }));
+    return sha(JSON.stringify([snapshot.fingerprint, hooks, this.options.shellFlavor ?? process.platform,
       this.options.defaultTimeoutMs ?? 600_000, this.options.maxOutputBytes ?? 1_048_576]));
   }
   private async trusted(cwd: string, snapshot: Snapshot): Promise<boolean> {
@@ -193,6 +225,7 @@ export class HooksEngine {
     if (!await current()) throw new Error('Hooks changed. Review again.');
     await this.trust.remember(state.cwd, request.fingerprint, this.policy(state.snapshot!), current);
     state.ignorePermanent = false;
+    this.hierarchy?.reset(request.sessionId);
   }
   async permissionStatus(id: string) {
     const state = this.sessions.get(id);
@@ -203,11 +236,12 @@ export class HooksEngine {
       const epoch = state.epoch, permanent = await this.trusted(state.cwd, snapshot);
       if (state.closed || state.snapshot !== snapshot || state.epoch !== epoch) return { session: false, permanent: false };
       if (permanent && !state.ignorePermanent) { state.approved = epoch; state.permanent = true; }
-      const session = state.approved === state.epoch;
+      const policy = this.hierarchy ? await this.hierarchy.sync(id, snapshot) : undefined;
+      const session = policy ? policy.hooks.filter(row => row.enabled).every(row => row.effective === 'allow') : state.approved === state.epoch;
       if (!session && hooks.length && !state.manual) state.manual = { id: `manual:${randomUUID()}`, epoch: state.epoch, fingerprint: snapshot.fingerprint, busy: false };
       const review = !session && state.manual ? { schema: 'dsh-hooks/approval-v1' as const, scope: 'session' as const, sessionId: id, cwd: state.cwd,
         fingerprint: snapshot.fingerprint, hooks, id: state.manual.id, manual: true as const } : undefined;
-      return { cwd: state.cwd, session, permanent, fingerprint: snapshot.fingerprint, hooks, ...(review ? { review } : {}) };
+      return { cwd: state.cwd, session, permanent, fingerprint: snapshot.fingerprint, hooks, ...(review ? { review } : {}), ...(policy ? { hierarchical: true, policy } : {}) };
     } catch (error) { return { cwd: state.cwd, session: false, permanent: false, problem: String(error) }; }
   }
   async answerManual(request: ManualAnswer): Promise<boolean> {
@@ -231,6 +265,7 @@ export class HooksEngine {
         if (request.decision === 'allow-permanent') await this.remember({ schema: 'dsh-hooks/approval-v1', scope: 'session', sessionId: request.sessionId, cwd, fingerprint: snapshot.fingerprint, hooks: [] }, signal);
         if (!await current()) return false;
         state.approved = epoch; state.permanent = request.decision === 'allow-permanent';
+        if (this.hierarchy && request.decision === 'allow-session') { this.hierarchy.legacySession(request.sessionId, snapshot, true); await this.hierarchy.sync(request.sessionId, snapshot); }
         if (state.manual === review) delete state.manual;
       }
       return true;
@@ -243,8 +278,10 @@ export class HooksEngine {
       if (!other.closed && await this.trust.scope(other.cwd).catch(() => '') === cwd) this.invalidate(other, 'permanent hook permission revoked');
     }
     await this.trust.forget(state.cwd);
+    if (this.hierarchy) await this.refreshPolicies();
   }
   stopWork(id: string): void {
+    this.hierarchy?.stop(id);
     const state = this.sessions.get(id); if (!state || state.closed) return;
     const approved = state.approved === state.epoch, permanent = state.permanent;
     this.invalidate(state, 'session work stopped');
@@ -252,16 +289,90 @@ export class HooksEngine {
   }
   retainContexts(id: string, outcome: Outcome): void {
     const state = this.state(id);
+    if (this.hierarchy && outcome.admissions) {
+      if (!state.closed) state.contexts.push(...outcome.admissions.filter(row => this.hierarchy!.active(id, row.token)).map(row => ({ revision: state.epoch, ...row })));
+      return;
+    }
     if (!state.closed && !outcome.deferred && outcome.revision === state.epoch) state.contexts.push(...outcome.context.map(text => ({ revision: state.epoch, text })));
   }
   takeContexts(id: string): string[] {
     const state = this.state(id);
-    return state.contexts.splice(0).filter(item => !state.closed && item.revision === state.epoch).map(item => item.text);
+    return state.contexts.splice(0).filter(item => !state.closed && (item.token ? this.hierarchy?.active(id, item.token) : item.revision === state.epoch)).map(item => item.text);
+  }
+  async collectContexts(id: string): Promise<string[]> { try { await this.refresh(id); return this.takeContexts(id); } catch { const state = this.sessions.get(id); if (state) state.contexts.length = 0; return []; } }
+  async outcomeCurrent(id: string, outcome: Outcome): Promise<boolean> {
+    if (!this.hierarchy || !outcome.leases) return true;
+    try { await this.refresh(id); return outcome.leases.every(token => this.hierarchy!.active(id, token)); } catch { return false; }
   }
   run(id: string, event: EventName, payload: Record<string, unknown>, subjects: readonly string[], signal: AbortSignal, approvedOnly = false): Promise<Outcome> {
     const state = this.state(id);
     if (state.closed) return Promise.resolve(unavailable(event, 'Hooks session has ended.'));
-    return this.track(state, this.runPoint(id, state, event, payload, subjects, signal, approvedOnly));
+    return this.track(state, this.hierarchy ? this.runHierarchical(id, state, event, payload, subjects, signal, approvedOnly) : this.runPoint(id, state, event, payload, subjects, signal, approvedOnly));
+  }
+  private async runHierarchical(id: string, state: SessionState, event: EventName, payload: Record<string, unknown>, subjects: readonly string[], signal: AbortSignal, approvedOnly: boolean): Promise<Outcome> {
+    const skip = (reason: string): Outcome => ({ ...emptyOutcome(), deferred: true, admissions: [], reason });
+    const hierarchy = this.hierarchy!, owner = AbortSignal.any([signal, state.life.signal, this.lifetime.signal]);
+    try {
+      owner.throwIfAborted(); let snapshot = await abortable(this.refresh(id), owner);
+      const matching = snapshot.hooks.filter(hook => hook.event === event && matches(hook, subjects));
+      const compactReview = ['SessionStart', 'UserPromptSubmit', 'PreCompact'].includes(event) && snapshot.hooks.some(hook => hook.event === 'PreCompact' || hook.event === 'PostCompact');
+      if (!matching.length && !compactReview) return { ...emptyOutcome(), admissions: [] };
+      let status = await hierarchy.sync(id, snapshot);
+      const unknown = (compactReview ? snapshot.hooks : matching).filter(hook => status.hooks.find(row => row.id === hook.permissionId)?.effective === 'ask');
+      if (unknown.length && !approvedOnly) {
+        const revision: Revision = { cwd: state.cwd, snapshot, epoch: state.epoch, signal: state.revision.signal };
+        // CLI compatibility may explicitly authorize the observed version; Web never enters native approval.
+        if (await this.permitted(id, state, revision, owner, false)) {
+          const reviewed = snapshot.hooks.filter(hook => status.hooks.find(row => row.id === hook.permissionId)?.effective === 'ask');
+          hierarchy.legacySession(id, { ...snapshot, hooks: reviewed, allHooks: reviewed }, true);
+          status = await hierarchy.sync(id, snapshot);
+        }
+      }
+      owner.throwIfAborted(); snapshot = await abortable(this.refresh(id), owner);
+      if (!matching.length) return { ...emptyOutcome(), admissions: [] };
+      const selected = matching.map(hook => ({ hook, lease: hierarchy.lease(id, hook.permissionId!) })).filter(row => row.lease?.version === row.hook.version);
+      if (!selected.length) return skip('Hooks skipped: permission was not granted.');
+      const execute = async (hook: Hook, lease: NonNullable<ReturnType<HookPermissions['lease']>>, background: boolean): Promise<Outcome> => {
+        const executionSignal = AbortSignal.any([lease.controller.signal, state.life.signal, this.lifetime.signal, ...background ? [] : [signal]]);
+        try {
+          executionSignal.throwIfAborted();
+          if (hook.statusMessage) this.log(hook.statusMessage);
+          if (hook.env.PLUGIN_DATA) await mkdir(hook.env.PLUGIN_DATA, { recursive: true, mode: 0o700 });
+          let timeoutMs = (hook.timeout ?? (this.options.defaultTimeoutMs ?? 600_000) / 1000) * 1000;
+          if (event === 'SessionEnd' || event === 'Interrupt') timeoutMs = Math.min(3000, Math.max(1000, (hook.timeout ?? 1) * 1000));
+          const spec = this.shell.resolve({ command: this.command(hook.command), workdir: state.cwd, stdin: JSON.stringify(payload), env: hook.env,
+            timeoutMs: Math.max(1, Math.ceil(timeoutMs)), stdoutMaxBytes: this.options.maxOutputBytes ?? 1_048_576, signal: executionSignal });
+          executionSignal.throwIfAborted(); const execution = await this.shell.execute(spec), result = await execution.result();
+          if (result.timedOut || result.aborted || result.stdout.truncated) throw new Error('Hook execution was incomplete');
+          await this.refresh(id); executionSignal.throwIfAborted();
+          if (!hierarchy.active(id, lease.token)) return emptyOutcome();
+          const out = decode(event, result.exitCode, result.stdout.text, result.stderr.text);
+          out.leases = [lease.token];
+          try { const raw: unknown = JSON.parse(result.stdout.text); if (raw && typeof raw === 'object' && 'systemMessage' in raw && typeof raw.systemMessage === 'string') this.log(raw.systemMessage); } catch {}
+          out.context = await Promise.all(out.context.map(text => this.limitContext(id, text, hook.additionalContextLimit)));
+          await this.refresh(id); executionSignal.throwIfAborted();
+          if (!hierarchy.active(id, lease.token)) return emptyOutcome();
+          out.admissions = out.context.map(text => ({ text, token: lease.token }));
+          if (background) { state.contexts.push(...out.admissions.map(row => ({ revision: state.epoch, ...row }))); return emptyOutcome(); }
+          return out;
+        } catch (error) { this.log(`${event} hook failed; skipped (${hook.source}): ${String(error)}`); return emptyOutcome(); }
+      };
+      const outputs = await Promise.all(selected.map(async ({ hook, lease }) => {
+        if (hook.async) { this.enqueueLease(state, lease!.controller.signal, () => execute(hook, lease!, true)); return { token: lease!.token, out: emptyOutcome() }; }
+        return { token: lease!.token, out: await execute(hook, lease!, false) };
+      }));
+      await abortable(this.refresh(id), owner); owner.throwIfAborted();
+      return merge(outputs.filter(row => hierarchy.active(id, row.token)).map(row => row.out));
+    } catch (error) { this.log(`${event} hooks skipped: ${String(error)}`); return skip('Hooks unavailable; native execution continues.'); }
+  }
+  private enqueueLease(state: SessionState, signal: AbortSignal, task: () => Promise<Outcome>): void {
+    if (state.queued.length >= 256) { this.log('Hook background queue is full; invocation skipped'); return; }
+    const start = () => {
+      if (signal.aborted || state.closed) { state.queued.shift()?.(); return; }
+      state.background++; const done = () => { state.background--; state.queued.shift()?.(); };
+      void this.track(state, task()).then(done, done);
+    };
+    if (state.background < 8) start(); else state.queued.push(start);
   }
   private async runPoint(id: string, state: SessionState, event: EventName, payload: Record<string, unknown>, subjects: readonly string[], signal: AbortSignal, approvedOnly: boolean): Promise<Outcome> {
     const cwd = state.cwd;
@@ -356,6 +467,7 @@ export class HooksEngine {
     return `${text.slice(0, Math.ceil(cap / 2))}\n[Hook context truncated.${saved}]\n${text.slice(-Math.floor(cap / 2))}`;
   }
   async detach(id: string): Promise<void> {
+    this.hierarchy?.detach(id);
     const state = this.sessions.get(id); if (!state) return;
     if (state.draining) return state.draining;
     state.closed = true; state.life.abort(new Error('session ended')); state.revision.abort(new Error('session ended'));

@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 import React, { act } from 'react';
 
-let dom, createRoot, Settings, copy, catalog, failure, written = [], switched = [], reads = 0;
+let dom, createRoot, Settings, copy, catalog, failure, written = [], switched = [], policyWrites = [], defaultWrites = [], reads = 0;
 const scopeId = 'd'.repeat(64), sourceId = 'e'.repeat(64);
 const sample = () => ({ revision: 'f'.repeat(64), scopeId, scopes: [{ id: scopeId, cwd: '/repo' }], issues: [], sources: [{
   id: sourceId, kind: 'user', path: '/home/.codex/hooks.json', errors: [], issues: ['Unsupported event PreModelRequest', 'Ignoring additionalContextLimit for Stop'], hooks: [
@@ -22,7 +22,7 @@ before(async () => {
     effect: init => init(), inject: (_deps, init) => init(ctx), locale: { register(_ns, dictionaries) { copy = dictionaries; return () => {}; } },
     slots: { inject(_name, init) { init(); }, register(spec, Component) { if (spec.name === 'plugins.detail.section') Settings = Component; return () => {}; } },
     remote: { async $mount(contribution) {
-      assert.equal(contribution.descriptors.length, 9);
+      assert.equal(contribution.descriptors.length, 12);
       const codec = contribution.descriptors.find(d => d.method === 'setEnabled').parameters[0].codec.create();
       assert.throws(() => codec.parse({ scopeId, revision: 'f'.repeat(64), id: 'a'.repeat(64), enabled: 'false' }));
       assert.equal(codec.parse({ scopeId, revision: 'f'.repeat(64), id: 'a'.repeat(64), enabled: false }).enabled, false);
@@ -35,12 +35,19 @@ before(async () => {
       },
       async readSource(request) { return { ok: true, value: { path: catalog.sources[0].path, revision: request.revision, content: '{"hooks":{}}' } }; },
       async writeSource(request) { written.push(request); if (failure) return { ok: false, error: { message: failure } }; return { ok: true, value: structuredClone(catalog) }; },
+      async setPermission(request) {
+        policyWrites.push(request); if (failure) return { ok: false, error: { message: failure } };
+        const row = catalog.permissions.hooks.find(row => row.id === request.id); row[request.scope] = request.choice;
+        row.effective = request.choice === 'inherit' ? 'ask' : request.choice; row.from = request.choice === 'inherit' ? 'default' : request.scope;
+        catalog.permissions.policyRevision = 'changed'; return { ok: true, value: structuredClone(catalog) };
+      },
+      async setDefaultPermission(request) { defaultWrites.push(request); if (failure) return { ok: false, error: { message: failure } }; catalog.permissions.globalDefault = request.enabled; return { ok: true, value: structuredClone(catalog) }; },
     } },
   }; await plugin.apply(ctx);
 });
 after(() => { dom.window.close(); delete globalThis.window; delete globalThis.document; });
 async function mount(subject = { kind: 'bundle', pkg: { name: '@simooom/dsh-hooks' } }) {
-  catalog = sample(); failure = undefined; written = []; switched = []; reads = 0;
+  catalog = sample(); failure = undefined; written = []; switched = []; policyWrites = []; defaultWrites = []; reads = 0;
   const container = document.createElement('main'); document.body.append(container); const root = createRoot(container);
   await act(async () => root.render(React.createElement(Settings, { subject, t: key => copy.zh[key] })));
   return { container, async cleanup() { await act(async () => root.unmount()); container.remove(); } };
@@ -126,5 +133,30 @@ test('unknown event names remain readable without looking up arbitrary locale ke
     catalog.sources[0].hooks.push({ ...catalog.sources[0].hooks[1], id: 'c'.repeat(64), event: 'toString', name: 'Unknown hook' });
     await click(view.container.querySelector('[aria-label=刷新钩子]')); await open(view);
     assert(view.container.textContent.includes('toString')); assert(view.container.textContent.includes('当前 Harness 版本未支持'));
+  } finally { await view.cleanup(); }
+});
+
+const permissionSample = () => ({ policyRevision: 'none', globalDefault: false, hooks: [{ id: 'a'.repeat(64), version: 'b'.repeat(64), name: 'Recall', event: 'SessionStart', choice: 'inherit', global: 'inherit', project: 'inherit', effective: 'ask', from: 'default', reviewRequired: false }] });
+const choose = async (element, value) => act(async () => { element.value = value; element.dispatchEvent(new dom.window.Event('change', { bubbles: true })); });
+
+test('settings manage global/project hook rules, origins and restore inheritance with explicit observed versions', async () => {
+  const view = await mount(); try {
+    catalog.permissions = permissionSample(); await click(view.container.querySelector('[aria-label=刷新钩子]'));
+    const scope = view.container.querySelector('[aria-label=权限范围]'), choice = view.container.querySelector('.dsh-hooks-policy-actions select');
+    await choose(choice, 'allow'); assert.equal(policyWrites[0].scope, 'global'); assert.equal(policyWrites[0].policyRevision, 'none'); assert(view.container.textContent.includes('来自全局设置'));
+    await choose(scope, 'project'); await choose(view.container.querySelector('.dsh-hooks-policy-actions select'), 'deny');
+    assert.equal(policyWrites[1].scope, 'project'); assert(view.container.textContent.includes('来自项目'));
+    await click(view.container.querySelector('[aria-label=恢复继承]')); assert.equal(policyWrites[2].choice, 'inherit');
+    assert.equal(view.container.querySelector('.dsh-hooks-policy-actions select').value, 'inherit');
+  } finally { await view.cleanup(); }
+});
+
+test('global default switch uses confirmed state and retains an error until explicit retry succeeds', async () => {
+  const view = await mount(); try {
+    catalog.permissions = permissionSample(); await click(view.container.querySelector('[aria-label=刷新钩子]'));
+    const toggle = view.container.querySelector('[aria-label=默认允许]'); failure = 'permission disk is read-only';
+    await act(async () => { toggle.click(); toggle.click(); }); assert.equal(defaultWrites.length, 1); assert.equal(toggle.getAttribute('aria-checked'), 'false');
+    assert(view.container.querySelector('[role=alert]').textContent.includes('read-only'));
+    failure = undefined; await click(toggle); assert.equal(toggle.getAttribute('aria-checked'), 'true'); assert.equal(defaultWrites[1].enabled, true);
   } finally { await view.cleanup(); }
 });

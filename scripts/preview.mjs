@@ -17,11 +17,11 @@ const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="v
 <style>main{max-width:none}#root{--dsh-composer-card-max-width:720px;--dsh-composer-side-clearance:16px;--dsh-composer-stack-gap:6px;display:flex;flex-direction:column;gap:var(--dsh-composer-stack-gap)}#root[data-layout=hero]{width:min(calc(var(--dsh-composer-card-max-width) + 2 * var(--dsh-composer-side-clearance)),100%);margin-inline:auto}</style>
 <style>${native.css}button{font-family:inherit}.native-modal-body{min-width:0}</style><script src="/react.js"></script><script src="/react-dom.js"></script><script>${native.js}</script><script>window.__ModuleLoader__={load(def){window.hooksPlugin=def.factory(name=>name==='react'?React:hooksUi)}};</script><script src="/client.js"></script>
 <script>
-const h=React.createElement; let Dock; window.answers=[];window.forgotten=[];window.permissionStatus=null;window.registeredSlots=[];
+const h=React.createElement; let Dock; window.answers=[];window.forgotten=[];window.permissionStatus=null;window.registeredSlots=[];window.instanceAnswers=[];window.ruleFailure=null;
 let requests=[{id:'preview',schema:'dsh-hooks/approval-v1',scope:'session',sessionId:'preview',cwd:'D:/work/project',fingerprint:'a'.repeat(64),hooks:[
 {event:'SessionStart',statusMessage:'加载项目上下文',command:'node ./hooks/context.mjs',source:'.codex/hooks.json'},
 {event:'PreToolUse',statusMessage:'检查待执行命令',command:'node ./hooks/guard.mjs',source:'.codex/hooks.json'}]}];
-const ctx={effect:fn=>fn(),inject:(_keys,fn)=>fn(ctx),locale:{register:(_ns,dict)=>{window.t=k=>dict.zh[k];return()=>{}}},slots:{inject:(_name,fn)=>fn(),register:(spec,Comp)=>{registeredSlots.push(spec.name);if(spec.name==='conversation.input.dock')Dock=Comp;return()=>{}}},remote:{$mount:async()=>()=>{},dshHooksPermissions:{list:async()=>({ok:true,value:{requests,status:permissionStatus}}),answer:async request=>{answers.push(request);permissionStatus={...requests[0],session:request.decision!=='deny',permanent:request.decision==='allow-permanent'};requests=[];return{ok:true,value:{accepted:true}}},status:async()=>({ok:true,value:permissionStatus}),forget:async request=>{forgotten.push(request);permissionStatus=null;return{ok:true,value:{revoked:true}}},revoke:async()=>({ok:true,value:{revoked:true}})}}};
+const ctx={effect:fn=>fn(),inject:(_keys,fn)=>fn(ctx),locale:{register:(_ns,dict)=>{window.t=k=>dict.zh[k];return()=>{}}},slots:{inject:(_name,fn)=>fn(),register:(spec,Comp)=>{registeredSlots.push(spec.name);if(spec.name==='conversation.input.dock')Dock=Comp;return()=>{}}},remote:{$mount:async()=>()=>{},dshHooksPermissions:{list:async()=>({ok:true,value:{requests,status:permissionStatus}}),answer:async request=>{answers.push(request);permissionStatus={...requests[0],session:request.decision!=='deny',permanent:request.decision==='allow-permanent'};requests=[];return{ok:true,value:{accepted:true}}},status:async()=>({ok:true,value:permissionStatus}),forget:async request=>{forgotten.push(request);permissionStatus=null;return{ok:true,value:{revoked:true}}},revoke:async()=>({ok:true,value:{revoked:true}}),setRule:async request=>{instanceAnswers.push(request);if(ruleFailure)return{ok:false,error:{message:ruleFailure}};const p=permissionStatus.policy;const hooks=p.hooks.map(row=>row.id!==request.id?row:{...row,choice:request.choice,effective:request.choice==='inherit'?'allow':request.choice,from:request.choice==='inherit'?'global':'session'});const next={...p,revision:'e'.repeat(64),hooks};permissionStatus={...permissionStatus,policy:next};return{ok:true,value:next};}}}};
 (async()=>{await hooksPlugin.apply(ctx);ReactDOM.createRoot(document.getElementById('root')).render(h(React.Fragment,null,h(Dock,{sessionId:'preview',t}),h('div',{className:'native-inputbar-root'},h('div',{className:'composer native-inputbar-card','data-composer-card':''},h('textarea',{'aria-label':'message',placeholder:'发送消息',rows:2,defaultValue:'正在编辑的草稿'}),h('footer',null,h('span',null,'DeepSeek V4'),h('div',null,h('button',{className:'send','aria-label':'发送'},'↑')))))));})();
 </script></html>`;
 const server = http.createServer(async (req, res) => {
@@ -75,15 +75,15 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: new URL('permissions-mobile.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
   const modal = page.getByRole('dialog'); const modalRect = await modal.boundingBox(); assert(modalRect.x >= 0 && modalRect.x + modalRect.width <= 390);
-  await page.getByRole('button', { name: '永久允许', exact: true }).click();
-  await page.getByRole('button', { name: '永久允许', exact: true }).waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: '本会话允许', exact: true }).click();
+  await page.getByRole('button', { name: '本会话允许', exact: true }).waitFor({ state: 'hidden' });
   assert.equal(await page.getByRole('textbox', { name: 'message' }).inputValue(), '正在编辑的草稿');
-  assert.equal(await page.evaluate(() => answers[0].decision), 'allow-permanent');
+  assert.equal(await page.evaluate(() => answers[0].decision), 'allow-session');
   await page.getByRole('button', { name: '管理 Hooks 授权' }).waitFor();
   assert.equal(await page.locator('.dsh-hooks-trigger').count(), 1); await aligned();
   await page.screenshot({ path: new URL('permissions-allowed.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
-  await page.getByRole('button', { name: '管理 Hooks 授权' }).click(); await page.getByRole('button', { name: '撤销永久允许' }).click();
-  assert.equal(await page.evaluate(() => forgotten[0].sessionId), 'preview');
+  await page.getByRole('button', { name: '管理 Hooks 授权' }).click(); await page.getByRole('button', { name: '撤销本会话' }).click();
+  await page.getByRole('dialog').waitFor({ state: 'hidden' });
   await page.evaluate(() => {
     document.body.setAttribute('data-ds-dark-theme', '');
     requests = [{ id: 'long', schema: 'dsh-hooks/approval-v1', scope: 'session', sessionId: 'preview', cwd: 'D:/work/' + 'long-path-'.repeat(30), fingerprint: 'b'.repeat(64),
@@ -100,10 +100,35 @@ try {
   await page.getByRole('textbox', { name:'message' }).fill('未授权时仍可输入和发送');
   await page.screenshot({ path: new URL('permissions-skipped.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
   await aligned();
-  await page.getByRole('button', { name: 'Hooks 已跳过' }).click(); assert.equal(await page.getByRole('button', { name:'永久允许', exact:true }).count(), 1);
+  await page.getByRole('button', { name: 'Hooks 已跳过' }).click(); assert.equal(await page.getByRole('button', { name:'永久允许', exact:true }).count(), 0);
   assert(await page.getByRole('dialog').innerText().then(text=>text.includes('手动授权从后续事件生效')));
   await page.screenshot({ path: new URL('permissions-manual.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
-  await page.getByRole('button', { name:'永久允许', exact:true }).click(); assert.equal(await page.evaluate(()=>answers[1].id),'manual:preview');
+  await page.getByRole('button', { name:'本会话允许', exact:true }).click(); assert.equal(await page.evaluate(()=>answers[1].id),'manual:preview');
+  await page.evaluate(() => {
+    requests=[];permissionStatus={hierarchical:true,policy:{cwd:'D:/work/project',revision:'d'.repeat(64),hooks:[
+      {id:'a'.repeat(64),version:'b'.repeat(64),event:'UserPromptSubmit',name:'Recall',command:'node ./recall.mjs',source:'.codex/hooks.json',enabled:true,choice:'inherit',global:'allow',project:'inherit',effective:'allow',from:'global',reviewRequired:false},
+      {id:'c'.repeat(64),version:'d'.repeat(64),event:'Stop',name:'Capture',command:'node ./capture.mjs',source:'.codex/hooks.json',enabled:true,choice:'inherit',global:'allow',project:'deny',effective:'deny',from:'project',reviewRequired:false}
+    ]}};
+  });
+  const instance = page.getByRole('button', { name:'Hooks 权限', exact:true }); await instance.waitFor(); await aligned(); await instance.click();
+  assert.equal(await page.getByRole('button',{name:'永久允许',exact:true}).count(),0);assert.equal(await page.getByRole('combobox',{name:'权限范围'}).count(),0);
+  const recall=page.getByRole('combobox',{name:'Recall 的权限'}); await recall.selectOption('deny');
+  await page.getByRole('button',{name:'恢复继承',exact:true}).waitFor();assert((await page.getByRole('dialog').innerText()).includes('本会话'));
+  await page.getByRole('button',{name:'恢复继承',exact:true}).click();await page.waitForFunction(()=>instanceAnswers.length===2);
+  assert.deepEqual(await page.evaluate(()=>Object.keys(instanceAnswers[0]).sort()),['choice','id','revision','sessionId']);
+  assert((await page.getByRole('dialog').innerText()).includes('来自项目'));assert((await page.getByRole('dialog').innerText()).includes('来自全局设置'));
+  await page.screenshot({path:new URL('hierarchy-session-mobile-dark.png',output).pathname.replace(/^\/([A-Z]:)/,'$1'),fullPage:true});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.evaluate(()=>{ruleFailure='permission disk unavailable';});await recall.selectOption('deny');await page.getByRole('alert').waitFor();
+  await page.getByRole('textbox',{name:'message'}).fill('授权异常后草稿仍可输入');await page.getByRole('button',{name:'关闭',exact:true}).click();
+  assert.equal(await page.getByRole('textbox',{name:'message'}).inputValue(),'授权异常后草稿仍可输入');
+  await page.evaluate(()=>{document.body.removeAttribute('data-ds-dark-theme');ruleFailure=null;});await page.setViewportSize({width:1000,height:760});await aligned();await instance.click();
+  await page.screenshot({path:new URL('hierarchy-session-error-desktop.png',output).pathname.replace(/^\/([A-Z]:)/,'$1'),fullPage:true});
+  await recall.selectOption('deny'); await page.getByRole('button',{name:'恢复继承',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('[aria-label="Recall 的权限"]').value==='inherit');
+  await page.getByRole('alert').waitFor({state:'hidden'});
+  await page.screenshot({path:new URL('hierarchy-session-desktop.png',output).pathname.replace(/^\/([A-Z]:)/,'$1'),fullPage:true});
+  await page.getByRole('button',{name:'关闭',exact:true}).click();
   assert.deepEqual(errors, []);
-  console.log('Browser QA passed with real Harness Modal/Button/theme: compact trigger, desktop/mobile dialog, focus restoration, permanent approval, revoke and retained draft.');
+  console.log('Browser QA passed with real Harness Modal/Button/theme: compact trigger, desktop/mobile dialog, focus restoration, per-hook instance policies, restore inheritance, isolated failures and retained draft.');
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

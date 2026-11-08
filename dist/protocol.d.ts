@@ -7,6 +7,10 @@ export type Json = null | boolean | number | string | Json[] | {
 export declare const object: (value: unknown) => value is Record<string, unknown>;
 export interface Hook {
     id: string;
+    /** Stable logical permission identity and the executable version reviewed by the owner. */
+    permissionId?: string;
+    version?: string;
+    legacyControlId?: string;
     event: EventName;
     command: string;
     matcher?: string;
@@ -25,6 +29,12 @@ export interface Outcome {
     deferred?: boolean;
     revision?: number;
     context: string[];
+    /** Internal per-hook provenance; never sent to the model. */
+    admissions?: {
+        text: string;
+        token: string;
+    }[];
+    leases?: string[];
     reason?: string;
     updatedInput?: Record<string, unknown>;
 }

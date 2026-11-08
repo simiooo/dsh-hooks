@@ -7,6 +7,10 @@ export const object = (value: unknown): value is Record<string, unknown> =>
 
 export interface Hook {
   id: string;
+  /** Stable logical permission identity and the executable version reviewed by the owner. */
+  permissionId?: string;
+  version?: string;
+  legacyControlId?: string;
   event: EventName;
   command: string;
   matcher?: string;
@@ -25,6 +29,9 @@ export interface Outcome {
   deferred?: boolean;
   revision?: number;
   context: string[];
+  /** Internal per-hook provenance; never sent to the model. */
+  admissions?: { text: string; token: string }[];
+  leases?: string[];
   reason?: string;
   updatedInput?: Record<string, unknown>;
 }
@@ -106,6 +113,8 @@ export function merge(outputs: Outcome[]): Outcome {
     merged.halt ||= out.halt;
     if (out.replace) merged.replace = true;
     merged.context.push(...out.context);
+    if (out.admissions) (merged.admissions ??= []).push(...out.admissions);
+    if (out.leases) (merged.leases ??= []).push(...out.leases);
     if (out.updatedInput) merged.updatedInput = out.updatedInput;
   }
   return merged;

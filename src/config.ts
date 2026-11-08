@@ -26,6 +26,7 @@ export interface Options {
 }
 export interface HookView {
   id: string; event: string; name: string; command: string; timeout: number; async: boolean;
+  permissionId?: string; version?: string;
   matcher?: string; enabled: boolean; supported: boolean; problem?: string;
 }
 export interface HookSource {
@@ -33,7 +34,7 @@ export interface HookSource {
   hooks: HookView[]; issues: string[]; errors: string[];
   missing?: boolean;
 }
-export interface Snapshot { hooks: Hook[]; fingerprint: string; files: string[]; diagnostics: string[]; sources: HookSource[]; disabled: string[] }
+export interface Snapshot { hooks: Hook[]; allHooks?: Hook[]; fingerprint: string; files: string[]; diagnostics: string[]; sources: HookSource[]; disabled: string[] }
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
 export { sha };
 const expandHome = (p: string) => p.startsWith('~/') || p.startsWith('~\\') ? join(homedir(), p.slice(2)) : p;
@@ -64,7 +65,9 @@ export function parseHooks(raw: unknown, source: string, env: Record<string, str
         const limit = rawHook.additionalContextLimit ?? 2500;
         if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 0) throw new Error(`${source}: invalid additionalContextLimit`);
         if (rawHook.additionalContextLimit !== undefined && ['Stop', 'Interrupt', 'SessionEnd', 'PreCompact', 'PostCompact'].includes(event)) diagnostics.push(`${source}: ignoring additionalContextLimit for ${event}: this event cannot emit additionalContext`);
-        hooks.push({ id: handlerId(source, event, groupIndex, handlerIndex, command, namespace), event: event as EventName, command, async: rawHook.async === true && event !== 'SessionEnd', source, env,
+        hooks.push({ id: handlerId(source, event, groupIndex, handlerIndex, command, namespace),
+          permissionId: sha(JSON.stringify([source, namespace, event, typeof rawHook.id === 'string' && rawHook.id.trim() ? { id: rawHook.id } : { command, matcher }])),
+          event: event as EventName, command, async: rawHook.async === true && event !== 'SessionEnd', source, env,
           additionalContextLimit: limit, ...(matcher === undefined ? {} : { matcher: matcher as string }),
           ...(timeout === undefined ? {} : { timeout: timeout as number }),
           ...(typeof rawHook.statusMessage === 'string' ? { statusMessage: rawHook.statusMessage } : {}),
@@ -192,12 +195,14 @@ export async function loadSnapshot(cwd: string, options: Options = {}, inspect =
     }
   }
   // Track directly referenced script files. Imported modules/data are declared with watchPaths.
+  const dependencies = new Map<Hook, string[]>();
   for (const hook of hooks) {
+    const files: string[] = []; dependencies.set(hook, files);
     const expanded = hook.command.replace(/\$\{(PLUGIN_ROOT|CLAUDE_PLUGIN_ROOT)\}/g, (_, key: string) => hook.env[key] ?? '');
     const tokens = expanded.match(/"[^"\n]*"|'[^'\n]*'|[^\s]+/g) ?? [];
     for (const token of tokens) {
       const path = token.replace(/^["']|["']$/g, '');
-      if (/\.(?:[cm]?[jt]s|py|sh|bash|ps1|cmd|bat)$/.test(path)) await record(resolve(cwd, path));
+      if (/\.(?:[cm]?[jt]s|py|sh|bash|ps1|cmd|bat)$/.test(path)) { const file = resolve(cwd, path); await record(file); files.push(file); }
     }
   }
   for (const path of options.watchPaths ?? []) await record(resolve(cwd, expandHome(path)));
@@ -212,6 +217,19 @@ export async function loadSnapshot(cwd: string, options: Options = {}, inspect =
   } catch (error) { if (!inspect) throw error; diagnostics.push(`Hooks controls unavailable: ${String(error)}`); }
   for (const source of sources) for (const hook of source.hooks) hook.enabled &&= !disabled.includes(hook.id);
   const sorted = (entries: Map<string, string | undefined>) => [...entries].sort(([a], [b]) => a.localeCompare(b));
+  const occurrences = new Map<string, number>();
+  for (const hook of hooks) {
+    const identity = hook.permissionId!, ordinal = occurrences.get(identity) ?? 0; occurrences.set(identity, ordinal + 1);
+    hook.permissionId = sha(JSON.stringify([identity, ordinal]));
+    const files = [...new Set([...(dependencies.get(hook) ?? []), ...(options.watchPaths ?? []).map(path => resolve(cwd, expandHome(path)))])].sort();
+    hook.version = sha(JSON.stringify({ event: hook.event, command: hook.command, matcher: hook.matcher, env: hook.env,
+      source: targets.get(hook.source) ?? hook.source, async: hook.async, timeout: hook.timeout ?? (options.defaultTimeoutMs ?? 600_000) / 1000,
+      limit: hook.additionalContextLimit, shell: platform, output: options.maxOutputBytes ?? 1_048_576,
+      files: files.map(file => [file, targets.get(file), content.get(file)]) }));
+    const view = sources.flatMap(source => source.hooks).find(view => view.id === hook.id);
+    hook.legacyControlId = hook.id; hook.id = hook.permissionId;
+    if (view) { view.id = hook.id; view.permissionId = hook.permissionId; view.version = hook.version; view.enabled &&= !disabled.includes(hook.id); }
+  }
   const fingerprint = sha(JSON.stringify({ content: sorted(content), targets: sorted(targets) }));
-  return { hooks: hooks.filter(hook => !disabled.includes(hook.id)), diagnostics, fingerprint, files: [...content.keys()], sources, disabled };
+  return { hooks: hooks.filter(hook => !disabled.includes(hook.id) && !disabled.includes(hook.legacyControlId!)), allHooks: hooks, diagnostics, fingerprint, files: [...content.keys()], sources, disabled };
 }

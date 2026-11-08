@@ -25,6 +25,8 @@ export interface HookView {
     command: string;
     timeout: number;
     async: boolean;
+    permissionId?: string;
+    version?: string;
     matcher?: string;
     enabled: boolean;
     supported: boolean;
@@ -41,6 +43,7 @@ export interface HookSource {
 }
 export interface Snapshot {
     hooks: Hook[];
+    allHooks?: Hook[];
     fingerprint: string;
     files: string[];
     diagnostics: string[];

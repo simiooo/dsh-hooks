@@ -49,6 +49,8 @@ export async function installManagementApi(ctx, manager) {
         let _setEnabled_decorators;
         let _readSource_decorators;
         let _writeSource_decorators;
+        let _setPermission_decorators;
+        let _setDefaultPermission_decorators;
         return class HooksManagementApi extends _classSuper {
             static {
                 const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
@@ -56,10 +58,14 @@ export async function installManagementApi(ctx, manager) {
                 _setEnabled_decorators = [Remote];
                 _readSource_decorators = [Remote];
                 _writeSource_decorators = [Remote];
+                _setPermission_decorators = [Remote];
+                _setDefaultPermission_decorators = [Remote];
                 __esDecorate(this, null, _catalog_decorators, { kind: "method", name: "catalog", static: false, private: false, access: { has: obj => "catalog" in obj, get: obj => obj.catalog }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _setEnabled_decorators, { kind: "method", name: "setEnabled", static: false, private: false, access: { has: obj => "setEnabled" in obj, get: obj => obj.setEnabled }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _readSource_decorators, { kind: "method", name: "readSource", static: false, private: false, access: { has: obj => "readSource" in obj, get: obj => obj.readSource }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _writeSource_decorators, { kind: "method", name: "writeSource", static: false, private: false, access: { has: obj => "writeSource" in obj, get: obj => obj.writeSource }, metadata: _metadata }, null, _instanceExtraInitializers);
+                __esDecorate(this, null, _setPermission_decorators, { kind: "method", name: "setPermission", static: false, private: false, access: { has: obj => "setPermission" in obj, get: obj => obj.setPermission }, metadata: _metadata }, null, _instanceExtraInitializers);
+                __esDecorate(this, null, _setDefaultPermission_decorators, { kind: "method", name: "setDefaultPermission", static: false, private: false, access: { has: obj => "setDefaultPermission" in obj, get: obj => obj.setDefaultPermission }, metadata: _metadata }, null, _instanceExtraInitializers);
                 if (_metadata) Object.defineProperty(this, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
             }
             constructor() {
@@ -75,6 +81,8 @@ export async function installManagementApi(ctx, manager) {
             setEnabled(request) { this.owner(); const data = input(request, ['scopeId', 'revision', 'id', 'enabled']); return manager.setEnabled(data.scopeId, data.revision, data.id, data.enabled); }
             readSource(request) { this.owner(); const data = input(request, ['scopeId', 'revision', 'sourceId']); return manager.readSource(data.scopeId, data.revision, data.sourceId); }
             writeSource(request) { this.owner(); const data = input(request, ['scopeId', 'revision', 'sourceId', 'content']); return manager.writeSource(data.scopeId, data.revision, data.sourceId, data.content); }
+            setPermission(request) { this.owner(); const data = input(request, ['scopeId', 'revision', 'policyRevision', 'id', 'scope', 'choice']); return manager.setPermission(data.scopeId, data.revision, data.policyRevision, data.id, data.scope, data.choice); }
+            setDefaultPermission(request) { this.owner(); const data = input(request, ['scopeId', 'revision', 'policyRevision', 'enabled']); return manager.setDefaultPermission(data.scopeId, data.revision, data.policyRevision, data.enabled); }
         };
     })();
     new HooksManagementApi();

@@ -4,11 +4,14 @@ import { randomUUID } from 'node:crypto';
 import { parse as parseToml } from 'smol-toml';
 import { controlsPath, loadSnapshot, sha, type Options, type Snapshot } from './config.js';
 import { object } from './protocol.js';
+import type { HooksEngine } from './engine.js';
+import type { PermissionChoice } from './policy.js';
 
 export interface Scope { id: string; cwd: string }
 export interface Catalog {
   revision: string; scopeId: string; scopes: Scope[];
   sources: Snapshot['sources']; issues: string[];
+  permissions?: Awaited<ReturnType<HooksEngine['policyCatalog']>>; permissionProblem?: string;
 }
 const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
 
@@ -16,7 +19,7 @@ const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
 export class HooksManagement {
   private tail: Promise<unknown> = Promise.resolve();
   private closed = false;
-  constructor(private options: Options, private directories: () => string[], private changed: () => Promise<void>) {}
+  constructor(private options: Options, private directories: () => string[], private changed: () => Promise<void>, private permissions?: HooksEngine) {}
   private scopes(): Scope[] { return [...new Set(this.directories().map(path => resolve(path)))].map(cwd => ({ id: sha(cwd), cwd })); }
   private scope(id?: string): Scope {
     if (this.closed) throw new Error('Hook management is closed');
@@ -32,7 +35,10 @@ export class HooksManagement {
       issues: snapshot.diagnostics.filter(issue => !snapshot.sources.some(source => source.issues.includes(issue))) };
   }
   async catalog(scopeId?: string): Promise<Catalog> {
-    const { scope, snapshot } = await this.snapshot(scopeId); return this.view(scope, snapshot);
+    const { scope, snapshot } = await this.snapshot(scopeId), view = this.view(scope, snapshot);
+    if (this.permissions) try { view.permissions = await this.permissions.policyCatalog(scope.cwd, snapshot); }
+    catch (error) { view.permissionProblem = String(error); }
+    return view;
   }
   private check(snapshot: Snapshot, revision: string): void {
     if (snapshot.fingerprint !== revision) throw new Error('Hooks changed. Refresh before saving.');
@@ -41,6 +47,26 @@ export class HooksManagement {
     const pending = this.tail.then(() => { if (this.closed) throw new Error('Hook management is closed'); return work(); });
     this.tail = pending.catch(() => {}); return pending;
   }
+  private current(scope: Scope, fingerprint: string): () => Promise<boolean> {
+    return async () => { try { this.scope(scope.id); return !this.closed && (await loadSnapshot(scope.cwd, this.options)).fingerprint === fingerprint; } catch { return false; } };
+  }
+  async setPermission(scopeId: string, revision: string, policyRevision: string, id: string, scope: 'global' | 'project', choice: PermissionChoice): Promise<Catalog> {
+    return this.serialize(async () => {
+      if (!this.permissions) throw new Error('Hook permission management is unavailable');
+      if (!['global', 'project'].includes(scope) || !['inherit', 'allow', 'deny'].includes(choice)) throw new TypeError('Invalid permission choice');
+      const current = await this.snapshot(scopeId); this.check(current.snapshot, revision);
+      await this.permissions.setPolicy(current.scope.cwd, current.snapshot, policyRevision, scope, id, choice, this.current(current.scope, revision));
+      return this.catalog(scopeId);
+    });
+  }
+  async setDefaultPermission(scopeId: string, revision: string, policyRevision: string, enabled: boolean): Promise<Catalog> {
+    return this.serialize(async () => {
+      if (!this.permissions) throw new Error('Hook permission management is unavailable');
+      const current = await this.snapshot(scopeId); this.check(current.snapshot, revision);
+      await this.permissions.setDefaultPolicy(current.scope.cwd, current.snapshot, policyRevision, enabled, this.current(current.scope, revision));
+      return this.catalog(scopeId);
+    });
+  }
   async setEnabled(scopeId: string, revision: string, id: string, enabled: boolean): Promise<Catalog> {
     return this.serialize(async () => {
       const { scope, snapshot } = await this.snapshot(scopeId); this.check(snapshot, revision);
@@ -48,6 +74,7 @@ export class HooksManagement {
       if (!hook?.supported) throw new Error('This hook cannot be enabled by this Harness version.');
       if (snapshot.diagnostics.some(issue => issue.startsWith('Hooks controls unavailable:'))) throw new Error('Repair the hooks controls file before changing switches.');
       const disabled = new Set(snapshot.disabled); if (enabled) disabled.delete(id); else disabled.add(id);
+      const legacy = snapshot.allHooks?.find(hook => hook.id === id)?.legacyControlId; if (enabled && legacy) disabled.delete(legacy);
       if (hook.enabled === enabled) return this.view(scope, snapshot);
       const latest = await this.snapshot(scope.id); this.check(latest.snapshot, revision);
       await this.atomicWrite(controlsPath(this.options), JSON.stringify({ schema: 'dsh-hooks/controls-v1', disabled: [...disabled].sort() }, null, 2) + '\n');

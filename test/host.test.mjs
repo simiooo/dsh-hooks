@@ -31,7 +31,7 @@ async function fixture(t, handlers = {}, options = {}) {
       return { result: async () => handlers[input.hook_event_name]?.(input, request) ?? success() };
     } },
   };
-  apply(ctx, { discover: false, configPaths: [file], shellFlavor: 'posix', maxStopContinuations: 2, ...options.engine });
+  apply(ctx, { discover: false, configPaths: [file], pluginDataRoot: join(dir, 'state'), shellFlavor: 'posix', maxStopContinuations: 2, ...options.engine });
   const session = { id: 's1', header: { id: 's1', cwd: dir, ...options.header }, snapshotEvents: () => options.history ?? [] };
   const agent = { id: 's1', session, options: { model: 'model' }, inject: x => injected.push(x), steer(x) {
     steered.push(x); listeners.get('session/event')(session, { type: 'agent/inbox/spliced', data: { inserted: [x] } });
@@ -64,21 +64,21 @@ test('SessionStart context survives prompt rejection and downstream rejection un
   assert.deepEqual(text((await f.pre()).messages), ['hello', 'prompt-context']);
 });
 
-test('SessionStart continue:false rejects once; unavailable permission skips hooks without losing the prompt', async t => {
+test('SessionStart controls apply once and a skipped start is not replayed after later approval', async t => {
   const f = await fixture(t, { SessionStart: () => json({ continue: false, stopReason: 'initial gate' }) });
   assert.equal((await f.pre()).kind, 'reject'); assert.equal((await f.pre()).kind, 'enter'); assert.equal(f.calls.length, 1);
   let allowed = false;
   const denied = await fixture(t, { SessionStart: () => success('now allowed') }, { authorize: () => allowed ? 'allowed-once' : 'rejected' });
   assert.equal((await denied.pre()).kind, 'enter'); assert.equal(denied.calls.length, 0); allowed = true;
-  assert(text((await denied.pre()).messages).includes('now allowed')); assert.equal(denied.reviews.length, 2);
+  assert.equal((await denied.pre()).kind, 'enter'); assert.equal(denied.calls.length, 0); assert.equal(denied.reviews.length, 1);
 });
-test('rejected, missing and throwing approval never swallow chat; unapproved tool hooks still deny tools', async t => {
+test('rejected, missing and throwing approval skip hooks while preserving chat and native tools', async t => {
   for (const outcome of ['rejected', 'unavailable', 'throw']) {
     const f = await fixture(t, { SessionStart: () => success('private startup'), UserPromptSubmit: () => success('private prompt'), PreToolUse: () => success() }, {
       authorize: () => { if (outcome === 'throw') throw new Error('answerer unavailable'); return outcome; },
     });
     const result = await f.pre(); assert.equal(result.kind, 'enter'); assert.deepEqual(text(result.messages), ['hello']);
-    assert.equal(f.calls.length, 0); assert.equal((await f.preTool()).kind, 'deny'); assert.equal(f.calls.length, 0);
+    assert.equal(f.calls.length, 0); assert.equal((await f.preTool()).kind, 'allow'); assert.equal(f.calls.length, 0);
   }
 });
 
@@ -224,4 +224,36 @@ test('same-ID agent creation waits for old cleanup and does not inherit its appr
   const messages = [message()];
   const result = await f.emit('agent/pre-step', { agent, messages, turn: 1, signal: signal() }, async () => ({ kind: 'enter', messages }));
   assert.equal(result.kind, 'enter'); assert.equal(f.reviews.length, 2);
+});
+
+test('hook working-directory failures and uncloneable inputs preserve native execution exactly once', async t => {
+  const f = await fixture(t, { SessionStart: () => success(), PreToolUse: () => success() }, { ensure: () => { throw new Error('plugin directory lookup unavailable'); } });
+  let entered = 0; const messages = [message()];
+  const result = await f.pre(messages, async () => { entered++; return { kind: 'enter', messages }; });
+  assert.equal(result.kind, 'enter'); assert.equal(entered, 1); assert.deepEqual(text(result.messages), ['hello']);
+  let tools = 0; const exec = f.exec(); exec.arguments = () => {};
+  assert.equal((await f.preTool(exec, async () => { tools++; return { kind: 'allow' }; })).kind, 'allow'); assert.equal(tools, 1);
+  let nativeErrors = 0; await assert.rejects(f.pre(messages, async () => { nativeErrors++; throw new Error('native failure'); }), /native failure/); assert.equal(nativeErrors, 1);
+});
+
+test('post-tool and context-injection exceptions cannot replace native results or execute tools twice', async t => {
+  const f = await fixture(t, { PreToolUse: () => json({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', additionalContext: 'hint' } }), PostToolUse: () => success() });
+  f.agent.inject = () => { throw new Error('injection unavailable'); };
+  let pre = 0, post = 0; assert.equal((await f.preTool(undefined, async () => { pre++; return { kind: 'allow' }; })).kind, 'allow'); assert.equal(pre, 1);
+  const native = { kind: 'accept', content: [{ type: 'text', text: 'unchanged native result' }] };
+  const broken = { get isError() { throw new Error('plugin result lookup failed'); } };
+  assert.equal(await f.postTool(broken, async () => { post++; return native; }), native); assert.equal(post, 1);
+});
+
+test('invalid hot-reloaded hook configuration leaves both chat and tools available', async t => {
+  const f = await fixture(t, { SessionStart: () => success(), PreToolUse: () => success() });
+  await f.pre(); await writeFile(f.file, 'invalid configuration');
+  assert.equal((await f.pre()).kind, 'enter'); assert.equal((await f.preTool()).kind, 'allow');
+});
+
+test('a hook revoked during downstream post-tool handling cannot replace or append to the native result', async t => {
+  const f = await fixture(t, { PostToolUse: () => json({ continue: false, stopReason: 'old replacement', hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: 'old context' } }) });
+  const native = { kind: 'accept', value: 'native result' };
+  const result = await f.postTool({ value: 'native result' }, async () => { await writeFile(f.file, 'invalidated during next'); return native; });
+  assert.equal(result, native);
 });

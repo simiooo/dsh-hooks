@@ -12,6 +12,33 @@ function contextMessage(context, event) {
 }
 /** Mount with a standard Cordis bundle row. Hook commands always require human review. */
 export function apply(ctx, options = {}) {
+    const diagnostic = (event, error) => { try {
+        ctx.logger.warn(`${event} hooks skipped: ${String(error)}`);
+    }
+    catch { } };
+    // A hook extension must not turn its own failure into a chat/tool failure or call next twice.
+    const listen = (event, handler) => ctx.on(event, (...args) => {
+        const native = typeof args.at(-1) === 'function' ? args.at(-1) : undefined;
+        let downstream;
+        const next = () => { if (!downstream) {
+            try {
+                downstream = Promise.resolve(native());
+            }
+            catch (error) {
+                downstream = Promise.reject(error);
+            }
+        } return downstream; };
+        const fallback = (error) => { diagnostic(event, error); return native ? next() : undefined; };
+        if (native)
+            args[args.length - 1] = next;
+        try {
+            const result = handler(...args);
+            return result && typeof result.then === 'function' ? result.catch(fallback) : result;
+        }
+        catch (error) {
+            return fallback(error);
+        }
+    });
     const states = new Map();
     const bySession = new Map();
     const detached = new Set();
@@ -44,14 +71,13 @@ export function apply(ctx, options = {}) {
         }) === 'allowed-once';
     };
     const engine = new HooksEngine(ctx.shell, authorize, options, msg => ctx.logger.warn(msg));
+    engine.enableHierarchy();
     const manager = new HooksManagement(engine.options, () => [
         ctx.workingDirectory.defaultDirectory ?? process.cwd(),
         ...[...states].filter(([, state]) => !state.closing).map(([agent, state]) => ctx.workingDirectory.get?.(agent.session) ?? state.cwd ?? agent.session.header.cwd ?? process.cwd()),
     ], async () => {
-        for (const agent of states.keys())
-            engine.revoke(agent.id);
         await Promise.allSettled([...states.keys()].map(agent => engine.refresh(agent.id)));
-    });
+    }, engine);
     ctx.inject(['typertGateway'], async (apiCtx) => {
         independentConsent = true;
         const { installPermissionApi } = await import('./permissions.js');
@@ -60,6 +86,7 @@ export function apply(ctx, options = {}) {
             status: async (id) => ({ ...await engine.permissionStatus(id), approvalPolicy: [...states].find(([agent]) => agent.id === id)?.[1].approvalPolicy ?? nativeApproval?.config?.policy ?? 'ask' }),
             forget: id => engine.forget(id),
             answerManual: request => engine.answerManual(request),
+            setRule: (id, revision, key, choice) => engine.setSessionPolicy(id, revision, key, choice),
         });
         const { installManagementApi } = await import('./management-api.js');
         await installManagementApi(apiCtx, manager);
@@ -111,22 +138,40 @@ export function apply(ctx, options = {}) {
             ...(['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt'].includes(event) ? { turn_id: String(state.turn) } : {}), ...extra };
     };
     async function run(agent, event, signal, extra = {}, subjects = [], approvedOnly = false) {
-        const closed = () => ({ block: true, halt: false, context: [], deferred: true, reason: 'Hooks session is closing.' });
-        if (event !== 'SessionEnd' && (ended.has(agent) || lifetime.signal.aborted))
-            return closed();
-        const state = stateOf(agent);
-        if (state.closing && event !== 'SessionEnd')
-            return closed();
-        const cwd = event === 'SessionEnd' && state.cwd ? state.cwd : await ctx.workingDirectory.ensure(agent, signal);
-        if (state.closing && event !== 'SessionEnd')
-            return closed();
-        state.cwd = cwd;
-        engine.attach(agent.id, cwd);
-        return engine.run(agent.id, event, payload(agent, event, cwd, extra), subjects, signal, approvedOnly);
+        const closed = () => ({ block: false, halt: false, context: [], deferred: true, reason: 'Hooks session is closing.' });
+        try {
+            if (event !== 'SessionEnd' && (ended.has(agent) || lifetime.signal.aborted))
+                return closed();
+            const state = stateOf(agent);
+            if (state.closing && event !== 'SessionEnd')
+                return closed();
+            const cwd = event === 'SessionEnd' && state.cwd ? state.cwd : await ctx.workingDirectory.ensure(agent, signal);
+            if (state.closing && event !== 'SessionEnd')
+                return closed();
+            state.cwd = cwd;
+            engine.attach(agent.id, cwd);
+            return await engine.run(agent.id, event, payload(agent, event, cwd, extra), subjects, signal, approvedOnly);
+        }
+        catch (error) {
+            diagnostic(event, error);
+            return { block: false, halt: false, context: [], deferred: true, reason: 'Hooks unavailable; native execution continues.' };
+        }
     }
     const halt = (agent, outcome) => {
         if (outcome.halt)
             agent.cancel({ kind: 'hook', reason: outcome.reason ?? 'Stopped by hook' }, { keepInbox: true });
+    };
+    class HookVeto extends Error {
+    }
+    const compactGuard = async (signal, action) => {
+        try {
+            await action();
+        }
+        catch (error) {
+            if (signal.aborted || error instanceof HookVeto)
+                throw error;
+            diagnostic('Compaction', error);
+        }
     };
     ctx.inject(['compaction', 'sessions'], async (scope) => {
         const ownerAgent = (owner) => {
@@ -148,12 +193,12 @@ export function apply(ctx, options = {}) {
                 const reason = out.reason ?? `${event} stopped compaction`;
                 ctx.logger.warn(reason);
                 agent.cancel({ kind: 'hook', reason }, { keepInbox: true });
-                throw new Error(reason);
+                throw new HookVeto(reason);
             }
         };
         const bridge = installCompactionBridge(scope.compaction, {
-            before: (owner, trigger, signal) => compactEvent(owner, 'PreCompact', trigger, signal),
-            after: async (owner, trigger, signal) => {
+            before: (owner, trigger, signal) => compactGuard(signal, () => compactEvent(owner, 'PreCompact', trigger, signal)),
+            after: (owner, trigger, signal) => compactGuard(signal, async () => {
                 await compactEvent(owner, 'PostCompact', trigger, signal);
                 const agent = ownerAgent(owner), state = stateOf(agent);
                 if (agent.session.header.origin === 'subagent')
@@ -163,8 +208,7 @@ export function apply(ctx, options = {}) {
                 // Include restoration before overflow retries too, which have no new agent/pre-step.
                 const out = await run(agent, 'SessionStart', signal, { source: 'compact' }, ['compact'], trigger === 'manual');
                 signal.throwIfAborted();
-                if (!out.deferred)
-                    state.started = true;
+                state.started = true;
                 if (out.deferred) {
                     ctx.logger.warn(`SessionStart skipped: ${out.reason ?? 'Hook permission unavailable.'}`);
                     return;
@@ -172,7 +216,7 @@ export function apply(ctx, options = {}) {
                 if (out.halt || out.block) {
                     const reason = out.reason ?? 'SessionStart stopped continuation after compaction';
                     agent.cancel({ kind: 'hook', reason }, { keepInbox: true });
-                    throw new Error(reason);
+                    throw new HookVeto(reason);
                 }
                 if (out.context.length) {
                     if (!agent.session.append)
@@ -181,12 +225,12 @@ export function apply(ctx, options = {}) {
                     if (trigger === 'manual')
                         await scope.sessions.flush(agent.session);
                 }
-            }, warn: message => ctx.logger.warn(message),
+            }), warn: message => ctx.logger.warn(message),
         });
         compactionBridges.add(bridge);
         scope.effect(() => async () => { await bridge.dispose(); compactionBridges.delete(bridge); }, 'dsh-hooks: compaction adapter');
     });
-    ctx.on('agent/created', async ({ agent, source }) => {
+    listen('agent/created', async ({ agent, source }) => {
         await closing.get(agent.id);
         const state = stateOf(agent);
         state.source = source;
@@ -197,7 +241,7 @@ export function apply(ctx, options = {}) {
             engine.attach(agent.id, cwd);
         }
     });
-    ctx.on('session/event', (session, event) => {
+    listen('session/event', (session, event) => {
         const agent = bySession.get(session);
         if (!agent)
             return;
@@ -215,7 +259,7 @@ export function apply(ctx, options = {}) {
             track(run(agent, 'Interrupt', lifetime.signal, {}, [], true));
         }
     });
-    ctx.on('agent/pre-step', async ({ agent, messages, turn, signal }, next) => {
+    listen('agent/pre-step', async ({ agent, messages, turn, signal }, next) => {
         if (ended.has(agent) || lifetime.signal.aborted)
             return { kind: 'reject' };
         const state = stateOf(agent);
@@ -223,6 +267,7 @@ export function apply(ctx, options = {}) {
         if (state.closing)
             return { kind: 'reject' };
         const injected = [];
+        let promptOutcome;
         if (!state.started) {
             // Approval requires an open turn and a visible Session. Still gates the very first model request.
             let outcome;
@@ -236,10 +281,9 @@ export function apply(ctx, options = {}) {
             }
             else
                 outcome = await run(agent, 'SessionStart', signal, { source: state.source }, [state.source]);
-            if (!outcome.deferred) {
-                state.started = true;
+            state.started = true;
+            if (!outcome.deferred)
                 engine.retainContexts(agent.id, outcome);
-            }
             if (outcome.deferred)
                 ctx.logger.warn(`SessionStart skipped: ${outcome.reason ?? 'Hook permission unavailable.'}`);
             else if (outcome.block || outcome.halt) {
@@ -256,12 +300,15 @@ export function apply(ctx, options = {}) {
                 ctx.logger.warn(outcome.reason ?? 'UserPromptSubmit hook rejected this input');
                 return { kind: 'reject' };
             }
-            injected.push(...outcome.context);
+            if (!outcome.deferred)
+                promptOutcome = outcome;
         }
         const downstream = await next();
         if (downstream.kind !== 'enter' || signal.aborted || state.closing || lifetime.signal.aborted)
             return downstream.kind === 'enter' ? { kind: 'reject' } : downstream;
-        injected.unshift(...engine.takeContexts(agent.id));
+        if (promptOutcome)
+            engine.retainContexts(agent.id, promptOutcome);
+        injected.unshift(...await engine.collectContexts(agent.id));
         return downstream.kind === 'enter' && injected.length ? { ...downstream, messages: [...downstream.messages, contextMessage(injected, 'context')] } : downstream;
     });
     const toolData = (exec) => {
@@ -272,7 +319,7 @@ export function apply(ctx, options = {}) {
         const subjects = canonical === 'apply_patch' ? [canonical, 'Edit', 'Write'] : [canonical, exec.name];
         return { extra: { tool_name: canonical, tool_input: input, tool_use_id: exec.callId }, subjects };
     };
-    ctx.on('tools/pre-execute', async (exec, next) => {
+    listen('tools/pre-execute', async (exec, next) => {
         if (!exec.agent)
             return next();
         const { extra, subjects } = toolData(exec);
@@ -285,7 +332,7 @@ export function apply(ctx, options = {}) {
             exec.agent.inject(contextMessage(out.context, 'PreToolUse'));
         return next(); // An allow never bypasses downstream safety/approval policies.
     });
-    ctx.on('tools/post-execute', async (exec, result, next) => {
+    listen('tools/post-execute', async (exec, result, next) => {
         if (!exec.agent)
             return next();
         const { extra, subjects } = toolData(exec);
@@ -294,6 +341,8 @@ export function apply(ctx, options = {}) {
         if (out.block)
             return { kind: 'block', feedback: [{ type: 'text', text: out.reason ?? 'Blocked by PostToolUse hook' }], ...(contexts.length ? { additionalContexts: contexts } : {}) };
         const downstream = await next();
+        if (!await engine.outcomeCurrent(exec.agent.id, out))
+            return downstream;
         let accepted = downstream;
         if (out.replace && downstream.kind !== 'block') {
             const { value: _value, ...metadata } = downstream;
@@ -301,7 +350,7 @@ export function apply(ctx, options = {}) {
         }
         return contexts.length ? { ...accepted, additionalContexts: [...contexts, ...(accepted.additionalContexts ?? [])] } : accepted;
     });
-    ctx.on('agent/turn-stopping', async ({ agent, turn, signal }) => {
+    listen('agent/turn-stopping', async ({ agent, turn, signal }) => {
         if (agent.session.header.origin === 'subagent')
             return;
         const state = stateOf(agent);
@@ -348,7 +397,7 @@ export function apply(ctx, options = {}) {
         void work.then(clear, clear);
         return work;
     };
-    ctx.on('agent/disposed', ({ agent }) => { if (states.has(agent))
+    listen('agent/disposed', ({ agent }) => { if (states.has(agent))
         track(close(agent)); });
     ctx.effect(() => async () => {
         await manager.dispose();

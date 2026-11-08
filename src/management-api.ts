@@ -23,6 +23,10 @@ export async function installManagementApi(ctx: any, manager: HooksManagement): 
     readSource(request: unknown) { this.owner(); const data = input(request, ['scopeId', 'revision', 'sourceId']); return manager.readSource(data.scopeId, data.revision, data.sourceId); }
     @Remote
     writeSource(request: unknown) { this.owner(); const data = input(request, ['scopeId', 'revision', 'sourceId', 'content']); return manager.writeSource(data.scopeId, data.revision, data.sourceId, data.content); }
+    @Remote
+    setPermission(request: unknown) { this.owner(); const data = input(request, ['scopeId', 'revision', 'policyRevision', 'id', 'scope', 'choice']); return manager.setPermission(data.scopeId, data.revision, data.policyRevision, data.id, data.scope, data.choice); }
+    @Remote
+    setDefaultPermission(request: unknown) { this.owner(); const data = input(request, ['scopeId', 'revision', 'policyRevision', 'enabled']); return manager.setDefaultPermission(data.scopeId, data.revision, data.policyRevision, data.enabled); }
   }
   new HooksManagementApi();
 }

@@ -10,12 +10,14 @@ export class HooksManagement {
     options;
     directories;
     changed;
+    permissions;
     tail = Promise.resolve();
     closed = false;
-    constructor(options, directories, changed) {
+    constructor(options, directories, changed, permissions) {
         this.options = options;
         this.directories = directories;
         this.changed = changed;
+        this.permissions = permissions;
     }
     scopes() { return [...new Set(this.directories().map(path => resolve(path)))].map(cwd => ({ id: sha(cwd), cwd })); }
     scope(id) {
@@ -38,8 +40,15 @@ export class HooksManagement {
             issues: snapshot.diagnostics.filter(issue => !snapshot.sources.some(source => source.issues.includes(issue))) };
     }
     async catalog(scopeId) {
-        const { scope, snapshot } = await this.snapshot(scopeId);
-        return this.view(scope, snapshot);
+        const { scope, snapshot } = await this.snapshot(scopeId), view = this.view(scope, snapshot);
+        if (this.permissions)
+            try {
+                view.permissions = await this.permissions.policyCatalog(scope.cwd, snapshot);
+            }
+            catch (error) {
+                view.permissionProblem = String(error);
+            }
+        return view;
     }
     check(snapshot, revision) {
         if (snapshot.fingerprint !== revision)
@@ -50,6 +59,37 @@ export class HooksManagement {
             throw new Error('Hook management is closed'); return work(); });
         this.tail = pending.catch(() => { });
         return pending;
+    }
+    current(scope, fingerprint) {
+        return async () => { try {
+            this.scope(scope.id);
+            return !this.closed && (await loadSnapshot(scope.cwd, this.options)).fingerprint === fingerprint;
+        }
+        catch {
+            return false;
+        } };
+    }
+    async setPermission(scopeId, revision, policyRevision, id, scope, choice) {
+        return this.serialize(async () => {
+            if (!this.permissions)
+                throw new Error('Hook permission management is unavailable');
+            if (!['global', 'project'].includes(scope) || !['inherit', 'allow', 'deny'].includes(choice))
+                throw new TypeError('Invalid permission choice');
+            const current = await this.snapshot(scopeId);
+            this.check(current.snapshot, revision);
+            await this.permissions.setPolicy(current.scope.cwd, current.snapshot, policyRevision, scope, id, choice, this.current(current.scope, revision));
+            return this.catalog(scopeId);
+        });
+    }
+    async setDefaultPermission(scopeId, revision, policyRevision, enabled) {
+        return this.serialize(async () => {
+            if (!this.permissions)
+                throw new Error('Hook permission management is unavailable');
+            const current = await this.snapshot(scopeId);
+            this.check(current.snapshot, revision);
+            await this.permissions.setDefaultPolicy(current.scope.cwd, current.snapshot, policyRevision, enabled, this.current(current.scope, revision));
+            return this.catalog(scopeId);
+        });
     }
     async setEnabled(scopeId, revision, id, enabled) {
         return this.serialize(async () => {
@@ -65,6 +105,9 @@ export class HooksManagement {
                 disabled.delete(id);
             else
                 disabled.add(id);
+            const legacy = snapshot.allHooks?.find(hook => hook.id === id)?.legacyControlId;
+            if (enabled && legacy)
+                disabled.delete(legacy);
             if (hook.enabled === enabled)
                 return this.view(scope, snapshot);
             const latest = await this.snapshot(scope.id);

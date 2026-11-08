@@ -112,6 +112,10 @@ export function merge(outputs) {
         if (out.replace)
             merged.replace = true;
         merged.context.push(...out.context);
+        if (out.admissions)
+            (merged.admissions ??= []).push(...out.admissions);
+        if (out.leases)
+            (merged.leases ??= []).push(...out.leases);
         if (out.updatedInput)
             merged.updatedInput = out.updatedInput;
     }

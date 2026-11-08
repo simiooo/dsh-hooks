@@ -59,6 +59,7 @@ export async function installPermissionApi(ctx, actions) {
         let _revoke_decorators;
         let _status_decorators;
         let _forget_decorators;
+        let _setRule_decorators;
         return class HooksPermissions extends _classSuper {
             static {
                 const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
@@ -67,11 +68,13 @@ export async function installPermissionApi(ctx, actions) {
                 _revoke_decorators = [Remote({ resources })];
                 _status_decorators = [Remote({ resources })];
                 _forget_decorators = [Remote({ resources })];
+                _setRule_decorators = [Remote({ resources })];
                 __esDecorate(this, null, _list_decorators, { kind: "method", name: "list", static: false, private: false, access: { has: obj => "list" in obj, get: obj => obj.list }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _answer_decorators, { kind: "method", name: "answer", static: false, private: false, access: { has: obj => "answer" in obj, get: obj => obj.answer }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _revoke_decorators, { kind: "method", name: "revoke", static: false, private: false, access: { has: obj => "revoke" in obj, get: obj => obj.revoke }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _status_decorators, { kind: "method", name: "status", static: false, private: false, access: { has: obj => "status" in obj, get: obj => obj.status }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _forget_decorators, { kind: "method", name: "forget", static: false, private: false, access: { has: obj => "forget" in obj, get: obj => obj.forget }, metadata: _metadata }, null, _instanceExtraInitializers);
+                __esDecorate(this, null, _setRule_decorators, { kind: "method", name: "setRule", static: false, private: false, access: { has: obj => "setRule" in obj, get: obj => obj.setRule }, metadata: _metadata }, null, _instanceExtraInitializers);
                 if (_metadata) Object.defineProperty(this, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
             }
             constructor() {
@@ -120,6 +123,15 @@ export async function installPermissionApi(ctx, actions) {
                 this.owner();
                 await actions.forget(sessionId(request));
                 return { revoked: true };
+            }
+            setRule(request) {
+                this.owner();
+                const sid = sessionId(request);
+                if (!object(request) || Object.keys(request).some(key => !['sessionId', 'revision', 'id', 'choice'].includes(key))
+                    || typeof request.revision !== 'string' || !/^[a-f0-9]{64}$/.test(request.revision)
+                    || typeof request.id !== 'string' || !/^[a-f0-9]{64}$/.test(request.id) || !['inherit', 'allow', 'deny'].includes(String(request.choice)))
+                    throw new TypeError('Invalid session hook permission');
+                return actions.setRule(sid, request.revision, request.id, request.choice);
             }
         };
     })();

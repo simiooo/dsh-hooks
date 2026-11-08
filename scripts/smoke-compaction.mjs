@@ -57,6 +57,7 @@ async function variant(kind, enabled, control = {}) {
     ctx.tools.register(tools.defineContentToolFixture({ name: 'cache_probe', description: 'Stable cache regression tool', parameters: { value: { type: 'string' } }, async execute() { throw new Error('Unexpected tool execution'); } }));
     ctx.provide('shell', { resolve: request => request, async execute(request) {
       const payload = JSON.parse(request.stdin); hookInputs.push(payload); trace.push(`hook:${payload.hook_event_name}`);
+      if (control.shellThrow) throw new Error('fixture plugin shell failure');
       let output = { hookSpecificOutput: { hookEventName: payload.hook_event_name, additionalContext: 'COMPACT_DIAGNOSTIC_MUST_NOT_ENTER_MODEL' } };
       if ((payload.hook_event_name === 'PreCompact' && control.preStop) || (payload.hook_event_name === 'PostCompact' && control.postStop)) output = { continue: false, stopReason: 'explicit hook stop' };
       if (payload.hook_event_name === 'SessionStart') output = control.restore ? 'restored after compact' : '';
@@ -77,7 +78,8 @@ async function variant(kind, enabled, control = {}) {
       PostCompact: [{ matcher: 'manual|auto', hooks: [{ type: 'command', command: 'post' }] }],
       SessionStart: [{ matcher: '^compact$', hooks: [{ type: 'command', command: 'restore' }] }],
     } }));
-    const loadHooks = async () => { fiber = ctx.plugin(Hooks, { discover: false, configPaths: [cfg], controlsPath: join(dir, `${kind}-controls.json`), shellFlavor: 'posix' }); await fiber; };
+    if (control.broken) await writeFile(cfg, 'broken configuration');
+    const loadHooks = async () => { fiber = ctx.plugin(Hooks, { discover: false, configPaths: [cfg], pluginDataRoot: join(dir, `${kind}-${enabled}-${!!control.broken}-${!!control.shellThrow}-state`), controlsPath: join(dir, `${kind}-controls.json`), shellFlavor: 'posix' }); await fiber; };
     if (enabled && kind === 'pressure') await loadHooks(); // Also exercise hooks loaded before the backend.
     await ctx.plugin(Basic, { auto: kind === 'overflow', thresholdRatio: kind === 'pressure' ? 0.01 : 0.99, retainTokens: 0, headroomTokens: 0, maxTokens: 256 });
     if (enabled && kind !== 'pressure') await loadHooks();
@@ -108,7 +110,7 @@ async function variant(kind, enabled, control = {}) {
     const summaries = requests.filter(request => request.summary);
     if (control.preStop) assert.equal(summaries.length, 0);
     else assert.equal(summaries.length, 1, `native compaction did not execute once: ${warnings.join('\n')}`);
-    if (enabled && !control.never) {
+    if (enabled && !control.never && !control.broken) {
       const expected = kind === 'manual' ? 'manual' : 'auto';
       assert.equal(hookInputs.filter(input => input.hook_event_name === 'PreCompact').length, 1);
       assert.equal(hookInputs.find(input => input.hook_event_name === 'PreCompact').trigger, expected);
@@ -140,6 +142,14 @@ try {
     assert.deepEqual(skipped.requests, baseline.requests, `${kind}: skipping unapproved hooks must preserve native requests and chat`);
     console.log(`${kind}: full-access/never chat + compaction and wire equality passed without executing unapproved hooks`);
   }
+  for (const kind of ['manual', 'pressure', 'overflow']) {
+    const baseline = await variant(kind, false);
+    for (const control of [{ broken: true }, { shellThrow: true }]) {
+      const failed = await variant(kind, true, control);
+      assert.deepEqual(failed.requests, baseline.requests, `${kind}: a plugin failure must not escape into native compaction or model requests`);
+    }
+    console.log(`${kind}: corrupt configuration and throwing hook shell preserve native requests`);
+  }
   await variant('manual', true, { preStop: true }); await variant('manual', true, { postStop: true });
   await variant('pressure', true, { preStop: true }); await variant('pressure', true, { postStop: true });
   await variant('overflow', true, { preStop: true }); await variant('overflow', true, { postStop: true });
@@ -149,5 +159,5 @@ try {
   console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-compaction-basic').manifest.version,
     checks: ['native manual maintenance', 'native pressure policy', 'real context-overflow retry', 'PreCompact/PostCompact timing and stops',
       'SessionStart compact restoration before retry', 'DeepSeek Messages wire equality against unhooked baseline', 'thinking/signature passback',
-      'in-history prompt and addition-only tool capability preserved', 'no synthetic compaction context in model input', 'both plugin load orders'] }, null, 2));
+      'in-history prompt and addition-only tool capability preserved', 'corrupt configuration and shell failures cannot bubble into native compaction', 'no synthetic compaction context in model input', 'both plugin load orders'] }, null, 2));
 } finally { await rm(dir, { recursive: true, force: true }); }

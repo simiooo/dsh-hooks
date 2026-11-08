@@ -1,5 +1,6 @@
 import { type Options, type Snapshot } from './config.js';
 import { type EventName, type Outcome } from './protocol.js';
+import type { PermissionChoice } from './policy.js';
 export interface ShellResult {
     exitCode: number | null;
     timedOut?: boolean;
@@ -51,7 +52,57 @@ export declare class HooksEngine {
     private disposal;
     readonly options: Readonly<Options>;
     private trust;
+    private hierarchy;
     constructor(shell: Shell, authorize: Authorize, options?: Options, log?: (message: string) => void);
+    /** The plugin uses per-hook policies; the old standalone engine API remains compatible. */
+    enableHierarchy(): void;
+    policyCatalog(cwd: string, snapshot: Snapshot): Promise<{
+        cwd: string;
+        project: string;
+        policyRevision: string;
+        globalDefault: boolean;
+        hooks: {
+            enabled: boolean;
+            id: string;
+            version: string;
+            event: string;
+            command: string;
+            source: string;
+            name: string;
+            choice: PermissionChoice;
+            global: PermissionChoice;
+            project: PermissionChoice;
+            effective: "allow" | "deny" | "ask";
+            from: "session" | "project" | "global" | "global-default" | "legacy" | "default";
+            reviewRequired: boolean;
+        }[];
+        revision: string;
+    }>;
+    private refreshPolicies;
+    setPolicy(cwd: string, snapshot: Snapshot, expected: string, scope: 'global' | 'project', key: string, choice: PermissionChoice, current: () => Promise<boolean>): Promise<void>;
+    setDefaultPolicy(cwd: string, snapshot: Snapshot, expected: string, enabled: boolean, current: () => Promise<boolean>): Promise<void>;
+    setSessionPolicy(id: string, revision: string, key: string, choice: PermissionChoice): Promise<{
+        cwd: string;
+        project: string;
+        policyRevision: string;
+        globalDefault: boolean;
+        hooks: {
+            enabled: boolean;
+            id: string;
+            version: string;
+            event: string;
+            command: string;
+            source: string;
+            name: string;
+            choice: PermissionChoice;
+            global: PermissionChoice;
+            project: PermissionChoice;
+            effective: "allow" | "deny" | "ask";
+            from: "session" | "project" | "global" | "global-default" | "legacy" | "default";
+            reviewRequired: boolean;
+        }[];
+        revision: string;
+    }>;
     start(): void;
     attach(id: string, cwd: string): void;
     private state;
@@ -69,6 +120,29 @@ export declare class HooksEngine {
         cwd?: never;
         problem?: never;
     } | {
+        hierarchical?: boolean;
+        policy?: {
+            cwd: string;
+            project: string;
+            policyRevision: string;
+            globalDefault: boolean;
+            hooks: {
+                enabled: boolean;
+                id: string;
+                version: string;
+                event: string;
+                command: string;
+                source: string;
+                name: string;
+                choice: PermissionChoice;
+                global: PermissionChoice;
+                project: PermissionChoice;
+                effective: "allow" | "deny" | "ask";
+                from: "session" | "project" | "global" | "global-default" | "legacy" | "default";
+                reviewRequired: boolean;
+            }[];
+            revision: string;
+        };
         review?: {
             schema: "dsh-hooks/approval-v1";
             scope: "session";
@@ -106,7 +180,11 @@ export declare class HooksEngine {
     stopWork(id: string): void;
     retainContexts(id: string, outcome: Outcome): void;
     takeContexts(id: string): string[];
+    collectContexts(id: string): Promise<string[]>;
+    outcomeCurrent(id: string, outcome: Outcome): Promise<boolean>;
     run(id: string, event: EventName, payload: Record<string, unknown>, subjects: readonly string[], signal: AbortSignal, approvedOnly?: boolean): Promise<Outcome>;
+    private runHierarchical;
+    private enqueueLease;
     private runPoint;
     private command;
     private track;

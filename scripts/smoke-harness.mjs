@@ -7,6 +7,7 @@ import { harnessSource } from './harness-source.mjs';
 import { createRequire, registerHooks } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import vm from 'node:vm';
+import React from 'react';
 
 const source = process.env.DSH_SOURCE_DIR;
 if (!source) throw new Error('Set DSH_SOURCE_DIR to a built deepseek-harness checkout (0.2.1-rc.2 or compatible).');
@@ -195,6 +196,38 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert.equal((await invoke('answer', { sessionId: 'hooks-never', id: staleDirectoryReview.id, fingerprint: staleDirectoryReview.fingerprint, decision: 'allow-permanent' })).accepted, false);
   assert.equal((await invoke('status', { sessionId: 'hooks-never' })).cwd, anotherDirectory);
   never.session.append('working-directory/change', { cwd: dir });
+  // The two management surfaces share one resolver; conversation edits remain instance-only.
+  const policyAgent = await ctx.agentLoop.create(session.SessionId('hooks-policy-instance'), { provider: 'mock', model: 'mock' }, { cwd: dir });
+  policyAgent.session.append('approval/policy', { policy: 'never' });
+  let policyCatalog = await manage('catalog', {});
+  const directoryScope = policyCatalog.scopes.find(scope => scope.cwd === dir).id;
+  policyCatalog = await manage('catalog', { scopeId: directoryScope });
+  const policyHook = policyCatalog.permissions.hooks.find(hook => hook.event === 'UserPromptSubmit');
+  const globalRequest = { scopeId: policyCatalog.scopeId, revision: policyCatalog.revision, policyRevision: policyCatalog.permissions.policyRevision, id: policyHook.id, scope: 'global', choice: 'allow' };
+  await assert.rejects(manage('setPermission', globalRequest, guest)); await assert.rejects(manage('setPermission', globalRequest, noInteraction));
+  policyCatalog = await manage('setPermission', globalRequest);
+  await assert.rejects(manage('setPermission', { ...globalRequest, choice: 'deny' }), /permissions changed/);
+  assert.equal((await invoke('status', { sessionId: policyAgent.id })).policy.hooks.find(row => row.id === policyHook.id).from, 'global');
+  policyCatalog = await manage('setPermission', { ...globalRequest, policyRevision: policyCatalog.permissions.policyRevision, scope: 'project', choice: 'deny' });
+  let instancePolicy = (await invoke('status', { sessionId: policyAgent.id })).policy;
+  assert.equal(instancePolicy.hooks.find(row => row.id === policyHook.id).effective, 'deny');
+  const instanceRequest = { sessionId: policyAgent.id, revision: instancePolicy.revision, id: policyHook.id, choice: 'allow' };
+  await assert.rejects(invoke('setRule', instanceRequest, guest)); await assert.rejects(invoke('setRule', instanceRequest, noInteraction));
+  instancePolicy = await invoke('setRule', instanceRequest);
+  assert.equal(instancePolicy.hooks.find(row => row.id === policyHook.id).from, 'session');
+  assert.equal((await manage('catalog', { scopeId: directoryScope })).permissions.policyRevision, policyCatalog.permissions.policyRevision, 'session edits cannot mutate durable templates');
+  await assert.rejects(invoke('setRule', instanceRequest), /permissions changed/);
+  await assert.rejects(invoke('setRule', { ...instanceRequest, scope: 'global' }), /Invalid/);
+  instancePolicy = await invoke('setRule', { ...instanceRequest, revision: instancePolicy.revision, choice: 'inherit' });
+  assert.equal(instancePolicy.hooks.find(row => row.id === policyHook.id).from, 'project');
+  const otherProject = await ctx.agentLoop.create(session.SessionId('hooks-policy-other'), { provider: 'mock', model: 'mock' }, { cwd: anotherDirectory });
+  const inherited = (await invoke('status', { sessionId: otherProject.id })).policy.hooks.find(row => row.id === policyHook.id);
+  assert.equal(inherited.effective, 'allow'); assert.equal(inherited.from, 'global');
+  const defaultRequest = { scopeId: directoryScope, revision: policyCatalog.revision, policyRevision: policyCatalog.permissions.policyRevision, enabled: true };
+  await assert.rejects(manage('setDefaultPermission', defaultRequest, guest));
+  policyCatalog = await manage('setDefaultPermission', defaultRequest);
+  assert.equal(policyCatalog.permissions.globalDefault, true);
+  assert.equal((await invoke('status', { sessionId: policyAgent.id })).policy.hooks.find(row => row.id === policyHook.id).effective, 'deny', 'default permission cannot erase a project exception');
   const { SlotCore } = await hostImport('@deepseek-ai/dsh-client-ui-slots');
   const slots = new SlotCore();
   const removeRoot = slots.register({ name: 'root', children: {
@@ -204,7 +237,7 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   } }, () => null);
   let client;
   vm.runInNewContext(await readFile(new URL('../client.js', import.meta.url), 'utf8'), {
-    window: { __ModuleLoader__: { load(definition) { client = definition.factory(() => ({ createElement() {} })); } } }, setTimeout, clearTimeout,
+    window: { __ModuleLoader__: { load(definition) { client = definition.factory(name => name === 'react' ? React : {}); } } }, setTimeout, clearTimeout,
   });
   const clientCtx = {
     effect: init => init(), inject: (_names, fn) => fn(clientCtx), locale: { register: () => () => {} },
@@ -214,12 +247,12 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   await client.apply(clientCtx);
   assert.equal(slots.entriesOfSlot('conversation.input.dock').length, 1);
   assert.equal(slots.entriesOfSlot('conversation.input.right').length, 0);
-  assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksPermissions').length, 5);
+  assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksPermissions').length, 6);
   assert.equal(slots.entriesOfSlot('plugins.detail.section').length, 1);
-  assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksManagement').length, 4);
+  assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksManagement').length, 6);
   removeRoot();
   await hooksFiber.dispose();
   rows = (await readFile(capture, 'utf8')).trim().split('\n').map(JSON.parse);
   assert(rows.some(row => row.hook_event_name === 'SessionEnd'), 'approved cleanup must run on plugin unload');
-  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'independent Owner audit without native tool approval', 'real Typert Gateway permission API', 'cross-session, wrong-fingerprint and duplicate answer rejection', 'non-interactive peer rejection', 'session revocation', 'durable approval + cold plugin restart + new session without prompt', 'global revocation + fresh session asks again', 'owner-only status/forget and idle manual session/permanent/deny under never', 'full-access never policy sends chat without running unapproved hooks', 'same-session temporary grant survives full-access switch', 'permanent grant reused under never policy', 'full non-shell arguments', 'tool deny', 'first-request context', 'PostToolUse replacement with model continuation', 'Stop continuation state and text', 'script hot reload and renewed permission', 'real management read/write, switches and stale revision rejection', 'management guest and non-interactive peer rejection', 'native permission/detail SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
+  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'independent Owner audit without native tool approval', 'real Typert Gateway permission API', 'cross-session, wrong-fingerprint and duplicate answer rejection', 'non-interactive peer rejection', 'session revocation', 'durable approval + cold plugin restart + new session without prompt', 'global revocation + fresh session asks again', 'owner-only status/forget and idle manual session/permanent/deny under never', 'full-access never policy sends chat without running unapproved hooks', 'same-session temporary grant survives full-access switch', 'permanent grant reused under never policy', 'full non-shell arguments', 'tool deny', 'first-request context', 'PostToolUse replacement with model continuation', 'Stop continuation state and text', 'script hot reload and renewed permission', 'real management read/write, switches and stale revision rejection', 'global/project/session per-hook inheritance and reset', 'session-only edits leave durable templates unchanged', 'stale and cross-scope mutation rejection', 'management guest and non-interactive peer rejection', 'native permission/detail SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
 } finally { await ctx.fiber.dispose(); protocolResolution.deregister(); await rm(dir, { recursive: true, force: true }); }
