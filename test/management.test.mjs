@@ -112,7 +112,7 @@ test('inline plugin controls share executable IDs and manifest edits retain root
   const path = join(metadata, 'plugin.json'); const manifest = { extensions: { 'com.openai': { hooks: configuration } } }; await writeFile(path, JSON.stringify(manifest));
   const options = { discover: false, pluginRoots: [root], controlsPath: f.controls };
   const manager = new HooksManagement(options, () => [f.dir], async () => {}); t.after(() => manager.dispose());
-  const data = await manager.catalog(); const source = data.sources[0]; assert.equal(source.path, path);
+  const data = await manager.catalog(); const source = data.sources[0]; assert.equal(source.path, await realpath(path));
   assert.equal(source.hooks[0].id, (await loadSnapshot(f.dir, options)).hooks[0].id);
   await assert.rejects(manager.writeSource(data.scopeId, data.revision, source.id, JSON.stringify({ hooks: './../outside.json' })), /must start with|escapes/);
   assert.equal(await readFile(path, 'utf8'), JSON.stringify(manifest));
