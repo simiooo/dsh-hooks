@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { HooksEngine } from './engine.js';
+import { HooksManagement } from './management.js';
 export { HooksEngine } from './engine.js';
 export const name = 'simiooo-hooks';
 export const inject = ['shell', 'workingDirectory', 'approval'];
@@ -34,9 +35,19 @@ export function apply(ctx, options = {}) {
         }) === 'allowed-once';
     };
     const engine = new HooksEngine(ctx.shell, authorize, options, msg => ctx.logger.warn(msg));
+    const manager = new HooksManagement(engine.options, () => [
+        ctx.workingDirectory.defaultDirectory ?? process.cwd(),
+        ...[...states].filter(([, state]) => !state.closing).map(([agent, state]) => ctx.workingDirectory.get?.(agent.session) ?? state.cwd ?? agent.session.header.cwd ?? process.cwd()),
+    ], async () => {
+        for (const agent of states.keys())
+            engine.revoke(agent.id);
+        await Promise.allSettled([...states.keys()].map(agent => engine.refresh(agent.id)));
+    });
     ctx.inject(['typertGateway'], async (apiCtx) => {
         const { installPermissionApi } = await import('./permissions.js');
         await installPermissionApi(apiCtx, id => engine.revoke(id));
+        const { installManagementApi } = await import('./management-api.js');
+        await installManagementApi(apiCtx, manager);
     });
     engine.start();
     const stateOf = (agent) => {
@@ -249,6 +260,7 @@ export function apply(ctx, options = {}) {
     ctx.on('agent/disposed', ({ agent }) => { if (states.has(agent))
         track(close(agent)); });
     ctx.effect(() => async () => {
+        await manager.dispose();
         await Promise.allSettled([...states.keys()].map(close));
         lifetime.abort();
         await engine.dispose();

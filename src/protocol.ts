@@ -6,6 +6,7 @@ export const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 
 export interface Hook {
+  id: string;
   event: EventName;
   command: string;
   matcher?: string;

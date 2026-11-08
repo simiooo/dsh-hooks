@@ -49,7 +49,9 @@
 - `test/engine.test.mjs`：权限、超时、并发、脚本哈希、配置失败、后台生命周期、会话重建及上下文版本。
 - `test/host.test.mjs`：七个原生事件适配、首轮上下文、结果替换、Stop 重放与上限、通知去重和子 agent 边界。
 - `test/client.test.mjs` / `test/permissions.test.mjs`：显式回答、会话切换、请求撤回、失败重试、输入法及审批类型校验。
+- `test/management.test.mjs` / `test/settings-client.test.mjs`：插件详情来源、未支持事件、持久启停、过期保存、JSON/TOML 校验、空配置创建、路径约束及管理控件。
 - `npm run test:harness`：真实 Cordis / AgentLoop / shell / Approval / Typert Gateway / SlotCore；含 PostToolUse 替换后模型继续、跨会话/版本/重复回答拒绝和重载再授权。
 - `npm run test:visual`：真实浏览器组件桌面与窄屏 QA；外围 composer 为夹具，不等于完整桌面应用端到端验收。
+- `npm run test:settings`：真实管理存储及浏览器的详情面板、窄屏、键盘焦点、启停及源编辑 QA；外围插件页为夹具。
 
 Harness 当前没有稳定的 Codex transcript 文件路径、权限模式映射、任意 developer 消息插入及完整结束原因；payload 为 transcript_path:null、permission_mode:default，附加上下文通过 Harness 消息通道注入，SessionEnd reason 为 other。SessionStart 延迟到 pre-step，Interrupt 在原生用户中断完成事件后触发。工具改参、未映射事件、非 command handler 和这些时序差异均为明确兼容缺口。

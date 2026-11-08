@@ -62,6 +62,8 @@ interface Context {
         }): Promise<string>;
     };
     workingDirectory: {
+        defaultDirectory?: string;
+        get?(session: Session): string;
         ensure(agent: Agent, signal: AbortSignal): Promise<string>;
     };
     logger: {

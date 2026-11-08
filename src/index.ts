@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { HooksEngine, type Shell, type PermissionRequest } from './engine.js';
 import type { Options } from './config.js';
 import type { EventName, Outcome } from './protocol.js';
+import { HooksManagement } from './management.js';
 export { HooksEngine } from './engine.js';
 export type { Options, Snapshot } from './config.js';
 export type { PermissionRequest } from './engine.js';
@@ -21,7 +22,7 @@ interface Agent {
 interface Context {
   shell: Shell;
   approval: { request(request: { agent: Agent; toolName: string; reason: string; displayReason?: { en: string; zh: string }; signal: AbortSignal }): Promise<string> };
-  workingDirectory: { ensure(agent: Agent, signal: AbortSignal): Promise<string> };
+  workingDirectory: { defaultDirectory?: string; get?(session: Session): string; ensure(agent: Agent, signal: AbortSignal): Promise<string> };
   logger: { warn(message: string): void };
   on(event: string, callback: (...args: any[]) => any): () => void;
   inject(services: string[], callback: (ctx: any) => Promise<void>): unknown;
@@ -61,9 +62,18 @@ export function apply(ctx: Context, options: Options = {}): void {
     }) === 'allowed-once';
   };
   const engine = new HooksEngine(ctx.shell, authorize, options, msg => ctx.logger.warn(msg));
+  const manager = new HooksManagement(engine.options, () => [
+    ctx.workingDirectory.defaultDirectory ?? process.cwd(),
+    ...[...states].filter(([, state]) => !state.closing).map(([agent, state]) => ctx.workingDirectory.get?.(agent.session) ?? state.cwd ?? agent.session.header.cwd ?? process.cwd()),
+  ], async () => {
+    for (const agent of states.keys()) engine.revoke(agent.id);
+    await Promise.allSettled([...states.keys()].map(agent => engine.refresh(agent.id)));
+  });
   ctx.inject(['typertGateway'], async apiCtx => {
     const { installPermissionApi } = await import('./permissions.js');
     await installPermissionApi(apiCtx, id => engine.revoke(id));
+    const { installManagementApi } = await import('./management-api.js');
+    await installManagementApi(apiCtx, manager);
   });
   engine.start();
   const stateOf = (agent: Agent): State => {
@@ -205,6 +215,7 @@ export function apply(ctx: Context, options: Options = {}): void {
   };
   ctx.on('agent/disposed', ({ agent }: { agent: Agent }) => { if (states.has(agent)) track(close(agent)); });
   ctx.effect(() => async () => {
+    await manager.dispose();
     await Promise.allSettled([...states.keys()].map(close));
     lifetime.abort(); await engine.dispose(); await Promise.allSettled([...detached]); states.clear(); bySession.clear();
   }, 'dsh-hooks: cancel, drain, and release hooks');

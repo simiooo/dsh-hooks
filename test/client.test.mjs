@@ -14,7 +14,7 @@ before(async () => {
   globalThis.window = dom.window; globalThis.document = dom.window.document; globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   ({ createRoot } = await import('react-dom/client')); document = dom.window.document;
   vm.runInNewContext(await readFile(new URL('../client.js', import.meta.url), 'utf8'), {
-    window: { __ModuleLoader__: { load(definition) { plugin = definition.factory(name => { assert.equal(name, 'react'); return React; }); } } }, setTimeout, clearTimeout,
+    window: { __ModuleLoader__: { load(definition) { plugin = definition.factory(name => { assert.equal(name, 'react'); return React; }); } } }, document, setTimeout, clearTimeout,
   });
   const ctx = {
     effect: init => init(), inject: (_deps, init) => init(ctx),
@@ -22,12 +22,12 @@ before(async () => {
     slots: { inject(_name, init) { init(); }, register(spec, component) { registrations.set(spec.name, { spec, component }); return () => {}; } },
     remote: {
       async $mount(contribution) {
-        assert.equal(contribution.descriptors.length, 3);
+        assert.equal(contribution.descriptors.length, 7);
         for (const descriptor of contribution.descriptors) {
           const codec = descriptor.parameters[0].codec;
           assert.equal(codec.mode, 'strict');
           assert.throws(() => codec.create().parse({ sessionId: 's1', unexpected: true }));
-          if (descriptor.method !== 'answer') assert.equal(codec.create().parse({ sessionId: 's1' }).sessionId, 's1');
+          if (descriptor.namespace === 'dshHooksPermissions' && descriptor.method !== 'answer') assert.equal(codec.create().parse({ sessionId: 's1' }).sessionId, 's1');
         }
         return () => {};
       },

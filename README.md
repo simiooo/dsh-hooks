@@ -1,6 +1,6 @@
 # DSH Hooks
 
-为 DeepSeek Harness 复用 **Codex command hooks**。支持配置和脚本热重载、输入框上方的人类授权，以及会话级撤销。当前是 0.1.1，支持下表中的事件，**尚未完整覆盖 Codex hooks**。
+为 DeepSeek Harness 复用 **Codex command hooks**。支持插件详情中的配置管理、配置和脚本热重载、输入框上方的人类授权，以及会话级撤销。当前是 0.2.0，支持下表中的事件，**尚未完整覆盖 Codex hooks**。
 
 ## 安装
 
@@ -17,6 +17,22 @@ dsh plugin --profile web add github:simiooo/dsh-hooks
 原生审批服务保留 `approval/asked` / `approval/decided` 审计。权限 API 使用 Harness 的认证与资源授权通道，只有具有交互能力的 **Host owner** 可以查看和批准；共享访客不能授权主机代码。无 UI 的 profile 使用原生审批回答器；没有回答器或审批被禁用时拒绝执行。
 
 授权不在会话间继承；子 agent 的工具 hook 在对应子会话中单独审查。
+
+## 在插件详情中配置
+
+打开 **插件 → DSH Hooks → 钩子**：
+
+- 来源卡片显示用户、项目、自定义和插件配置的钩子数、问题数；刷新按钮重新读取，打开页面时也会自动更新。
+- 点击来源，按事件查看钩子；展开显示命令、超时、匹配器及后台状态。未支持事件或无效处理器保留展示并禁用开关。
+- 逐项开关立即影响 DSH 执行，并在重启后保留。开关变化撤销旧版本审批及运行任务，后续执行重新审查。
+- 「编辑配置」打开实际 JSON / TOML 源文件并显示规范化后的真实路径。保存前校验语法和对应配置；文件、脚本、链接目标或开关已变化时拒绝过期保存，保留编辑草稿。TOML 原文和注释按用户编辑后的文本保存。
+- 默认用户文件尚不存在时，可从空来源的「创建配置」建立 `hooks.json`。创建使用排他发布，不覆盖同时新建的文件。
+
+有多个已知工作目录时，目录选择器切换所检查的项目层；用户配置适用于所有项目。详情贡献仅显示在本插件的 bundle / row 页面，使用原生 `plugins.detail.section` 插槽，无需修改 Harness。
+
+开关保存在 Host 的 `~/.dsh/hooks-data/controls.json`，可通过 `controlsPath` 改写；设置 `pluginDataRoot` 时默认随之移动。它们适用于读取同一配置的 DSH 会话/profile。开关身份绑定来源路径、事件、所在位置及命令；移动或修改命令后视为新钩子，仍须重新审查。配置文件本身只在用户明确保存编辑时修改。
+
+管理 API 仅允许交互式 Host owner；请求使用 Host 已枚举的工作目录和来源 ID，拒绝任意文件路径。界面不执行展示中的命令。详情页依赖原生插件管理页面；会话权限条继续使用原有 composer 插槽。
 
 ## 最小示例
 
@@ -104,7 +120,7 @@ config:
 
 ## 热重载
 
-按文件内容哈希检测变化，不依赖 mtime。覆盖配置、manifest、命令直接引用的 `.js/.mjs/.cjs/.ts/.py/.sh/.ps1/.cmd/.bat` 文件和 `watchPaths`；新增文件、删除文件和编辑器原子保存都可检测。解释器导入的模块、无扩展名程序、复杂 shell 间接引用和数据文件请显式加入 `watchPaths`。
+按文件内容及实际路径哈希检测变化，不依赖 mtime。覆盖配置、manifest、命令直接引用的 `.js/.mjs/.cjs/.ts/.py/.sh/.ps1/.cmd/.bat` 文件和 `watchPaths`；新增文件、删除文件、编辑器原子保存和同内容链接换目标都可检测。解释器导入的模块、无扩展名程序、复杂 shell 间接引用和数据文件请显式加入 `watchPaths`。
 
 文件变化会取消旧版本的待审批请求和运行任务，清除该版本授权；下一次执行重新审查。每个事件执行前也复核快照。配置语法错误会阻止相关操作，不继续执行旧配置。热重载不自动重放已发生的事件；插件自身代码更新遵循 Harness 的插件加载/重启流程。
 
@@ -125,9 +141,11 @@ $env:DSH_SOURCE_DIR = 'D:\path\to\deepseek-harness'
 npm run test:harness
 ```
 
-验证运行真实 Cordis、AgentLoop、shell、原生审批审计和 Typert Gateway，覆盖工具拒绝、完整参数、首轮上下文、PostToolUse 结果替换与继续、Stop 状态、脚本热重载及重新授权、跨会话/错误版本/重复回答拒绝、交互权限和撤销。普通测试另覆盖 UI 操作、并发、超时、异步队列、原子保存和协议边界。
+验证运行真实 Cordis、AgentLoop、shell、原生审批审计和 Typert Gateway，覆盖工具拒绝、完整参数、首轮上下文、PostToolUse 结果替换与继续、Stop 状态、脚本热重载及重新授权、跨会话/错误版本/重复回答拒绝、交互权限和撤销；另验证详情管理 API 的读写、持久开关、过期保存拒绝、访客拒绝及原生详情插槽注册。普通测试另覆盖 UI 操作、并发、超时、异步队列、原子保存和协议边界。
 
 `npm run test:visual` 可在已安装 Edge 的 Windows 上检查真实权限组件的桌面/窄屏布局与交互，截图写入 `.artifacts/`；其他平台通过 `BROWSER_PATH` 指定 Chromium 可执行文件。预览中的外围 composer 是测试夹具。
+
+`npm run test:settings` 使用真实配置管理存储及浏览器，检查来源列表、事件详情、问题、窄屏、原生 dialog 焦点、持久启停和源文件编辑。截图写入 `.artifacts/settings-*.png`；外围插件详情页是夹具，配置及开关仅写入独立临时目录。
 
 开发交付按本项目要求不部署 staging。尚未声称完整桌面宿主的端到端视觉验收；UI 的组件交互及原生插槽契约单独验证。
 

@@ -57,6 +57,7 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   await ctx.plugin(Registry); await ctx.plugin(Access); await ctx.plugin(Gateway, {});
   const peer = new Peer(ctx, { principal: { kind: 'owner' }, interactions: 'answer' });
   const invoke = (method, request, caller = peer) => ctx.typertGateway.invoke({ namespace: 'dshHooksPermissions', method, args: { request }, peer: caller });
+  const manage = (method, request, caller = peer) => ctx.typertGateway.invoke({ namespace: 'dshHooksManagement', method, args: { request }, peer: caller });
   const asks = [];
   let answering = false;
   const answerTimer = setInterval(async () => {
@@ -78,7 +79,7 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   ctx.llm.registerAdapter(['mock'], adapter);
   const executions = [];
   ctx.tools.register(tools.defineContentToolFixture({ name: 'echo', description: 'smoke', parameters: { text: { type: 'string' }, nested: { type: 'object', properties: { count: { type: 'integer' } }, additionalProperties: false } }, async execute(args) { executions.push(args.text); return [{ type: 'text', text: 'ORIGINAL_TOOL_OUTPUT' }]; } }));
-  const hooksFiber = ctx.plugin(Plugin, { discover: false, configPaths: [configPath], pollIntervalMs: 1000 });
+  const hooksFiber = ctx.plugin(Plugin, { discover: false, configPaths: [configPath], controlsPath: join(dir, 'controls.json'), pollIntervalMs: 1000 });
   await hooksFiber;
   const agent = await ctx.agentLoop.create(session.SessionId('hooks-smoke'), { provider: 'mock', model: 'mock' }, { cwd: dir });
   const send = value => agent.followup(llm.createUserMessage({ content: [{ type: 'text', text: value }], source: { kind: 'user' } }));
@@ -94,6 +95,15 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert(JSON.stringify(adapter.requests[2]).includes('post context'));
   assert(!JSON.stringify(adapter.requests[2]).includes('ORIGINAL_TOOL_OUTPUT'), 'original output must be replaced');
   await invoke('revoke', { sessionId: 'hooks-smoke' });
+  const catalog = await manage('catalog', {});
+  const managedHook = catalog.sources.flatMap(source => source.hooks).find(hook => hook.event === 'PostToolUse');
+  const disabled = await manage('setEnabled', { scopeId: catalog.scopeId, revision: catalog.revision, id: managedHook.id, enabled: false });
+  assert.equal(disabled.sources.flatMap(source => source.hooks).find(hook => hook.id === managedHook.id).enabled, false);
+  await assert.rejects(manage('setEnabled', { scopeId: catalog.scopeId, revision: catalog.revision, id: managedHook.id, enabled: true }), /Hooks changed/);
+  const enabled = await manage('setEnabled', { scopeId: disabled.scopeId, revision: disabled.revision, id: managedHook.id, enabled: true });
+  const config = await manage('readSource', { scopeId: enabled.scopeId, revision: enabled.revision, sourceId: enabled.sources[0].id });
+  const saved = await manage('writeSource', { scopeId: enabled.scopeId, revision: enabled.revision, sourceId: enabled.sources[0].id, content: config.content + '\n' });
+  assert.notEqual(saved.revision, enabled.revision);
   // Script-only change: next turn asks again, with no plugin or agent restart.
   await writeFile(scriptPath, (await readFile(scriptPath, 'utf8')) + '\n// changed revision\n');
   send('test reload'); await agent.whenIdle(); assert.equal(asks.length, 2);
@@ -105,11 +115,15 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert.equal(decisions.length, 2); assert(decisions.every(e => e.data.outcome === 'allowed-once'));
   const noInteraction = new Peer(ctx, { principal: { kind: 'owner' }, interactions: 'none' });
   await assert.rejects(invoke('list', { sessionId: 'hooks-smoke' }, noInteraction), /interactive Host owner/);
+  await assert.rejects(manage('catalog', {}, noInteraction), /interactive Host owner/);
+  const guest = new Peer(ctx, { principal: { kind: 'guest', id: 'guest' }, interactions: 'answer' });
+  await assert.rejects(manage('catalog', {}, guest));
   const { SlotCore } = await hostImport('@deepseek-ai/dsh-client-ui-slots');
   const slots = new SlotCore();
   const removeRoot = slots.register({ name: 'root', children: {
     'conversation.input.dock': { kind: 'list', scope: 'session' },
     'conversation.input.right': { kind: 'list', scope: 'session' },
+    'plugins.detail.section': { kind: 'list', scope: 'root' },
   } }, () => null);
   let client;
   vm.runInNewContext(await readFile(new URL('../client.js', import.meta.url), 'utf8'), {
@@ -123,9 +137,11 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   await client.apply(clientCtx);
   assert.equal(slots.entriesOfSlot('conversation.input.dock').length, 1);
   assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksPermissions').length, 3);
+  assert.equal(slots.entriesOfSlot('plugins.detail.section').length, 1);
+  assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksManagement').length, 4);
   removeRoot();
   await hooksFiber.dispose();
   rows = (await readFile(capture, 'utf8')).trim().split('\n').map(JSON.parse);
   assert(rows.some(row => row.hook_event_name === 'SessionEnd'), 'approved cleanup must run on plugin unload');
-  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'native approval audit', 'real Typert Gateway permission API', 'cross-session, wrong-fingerprint and duplicate answer rejection', 'non-interactive peer rejection', 'session revocation', 'full non-shell arguments', 'tool deny', 'first-request context', 'PostToolUse replacement with model continuation', 'Stop continuation state and text', 'script hot reload and renewed permission', 'native SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
+  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'native approval audit', 'real Typert Gateway permission API', 'cross-session, wrong-fingerprint and duplicate answer rejection', 'non-interactive peer rejection', 'session revocation', 'full non-shell arguments', 'tool deny', 'first-request context', 'PostToolUse replacement with model continuation', 'Stop continuation state and text', 'script hot reload and renewed permission', 'real management read/write, switches and stale revision rejection', 'management guest and non-interactive peer rejection', 'native permission/detail SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
 } finally { await ctx.fiber.dispose(); protocolResolution.deregister(); await rm(dir, { recursive: true, force: true }); }

@@ -6,6 +6,7 @@ export type Json = null | boolean | number | string | Json[] | {
 };
 export declare const object: (value: unknown) => value is Record<string, unknown>;
 export interface Hook {
+    id: string;
     event: EventName;
     command: string;
     matcher?: string;
