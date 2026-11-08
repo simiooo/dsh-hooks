@@ -13,7 +13,7 @@ interface Frame {
   before?: Promise<void>; id?: string;
 }
 type Method = (this: any, ...args: any[]) => any;
-const marker = Symbol.for('@simiooo/dsh-hooks/compaction');
+const marker = Symbol.for('@simooom/dsh-hooks/compaction');
 function method(target: object, key: string): Method {
   let at: object | null = target;
   while (at) {

@@ -1,4 +1,4 @@
-const marker = Symbol.for('@simiooo/dsh-hooks/compaction');
+const marker = Symbol.for('@simooom/dsh-hooks/compaction');
 function method(target, key) {
     let at = target;
     while (at) {

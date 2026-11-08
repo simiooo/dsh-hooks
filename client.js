@@ -1,6 +1,6 @@
 /* Client factory: React and the composer come from Harness, never from a second app root. */
 window.__ModuleLoader__.load({
-  id: '@simiooo/dsh-hooks',
+  id: '@simooom/dsh-hooks',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -222,9 +222,9 @@ window.__ModuleLoader__.load({
       error && h('div', { className: 'dsh-hooks-error', role: 'alert' }, error));
     }
     const descriptors = ['list', 'answer', 'revoke'].map(method => ({
-      id: `@simiooo/dsh-hooks#permissions.${method}`, service: 'dshHooksPermissions', namespace: 'dshHooksPermissions', method,
+      id: `@simooom/dsh-hooks#permissions.${method}`, service: 'dshHooksPermissions', namespace: 'dshHooksPermissions', method,
       invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', codec: {
-        mode: 'strict', typeSymbol: `@simiooo/dsh-hooks#${method}Input`,
+        mode: 'strict', typeSymbol: `@simooom/dsh-hooks#${method}Input`,
         create: () => ({ parse(value) {
           const keys = method === 'answer' ? ['sessionId', 'id', 'fingerprint', 'decision'] : ['sessionId'];
           if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !keys.includes(k))
@@ -236,8 +236,8 @@ window.__ModuleLoader__.load({
     }));
     const managementKeys = { catalog: [], setEnabled: ['scopeId', 'revision', 'id', 'enabled'], readSource: ['scopeId', 'revision', 'sourceId'], writeSource: ['scopeId', 'revision', 'sourceId', 'content'] };
     for (const [method, required] of Object.entries(managementKeys)) descriptors.push({
-      id: `@simiooo/dsh-hooks#management.${method}`, service: 'dshHooksManagement', namespace: 'dshHooksManagement', method, invocation: { kind: 'direct' },
-      parameters: [{ name: 'request', wire: 'request', source: 'json', codec: { mode: 'strict', typeSymbol: `@simiooo/dsh-hooks#${method}Input`, create: () => ({ parse(value) {
+      id: `@simooom/dsh-hooks#management.${method}`, service: 'dshHooksManagement', namespace: 'dshHooksManagement', method, invocation: { kind: 'direct' },
+      parameters: [{ name: 'request', wire: 'request', source: 'json', codec: { mode: 'strict', typeSymbol: `@simooom/dsh-hooks#${method}Input`, create: () => ({ parse(value) {
         const keys = method === 'catalog' ? ['scopeId'] : required;
         if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))
           || required.some(key => key === 'enabled' ? typeof value[key] !== 'boolean' : typeof value[key] !== 'string')
@@ -249,10 +249,10 @@ window.__ModuleLoader__.load({
       inject: ['slots', 'locale', 'remote'],
       async apply(ctx) {
         ctx.effect(() => ctx.locale.register('dsh-hooks', { en, zh }), 'dsh-hooks: permission copy');
-        await ctx.remote.$mount({ package: '@simiooo/dsh-hooks', descriptors });
+        await ctx.remote.$mount({ package: '@simooom/dsh-hooks', descriptors });
         ctx.inject(['remote.dshHooksManagement'], scope => {
           function HooksSection({ subject, t }) {
-            return (subject?.kind === 'bundle' || subject?.kind === 'row') && subject.pkg?.name === '@simiooo/dsh-hooks'
+            return (subject?.kind === 'bundle' || subject?.kind === 'row') && subject.pkg?.name === '@simooom/dsh-hooks'
               ? h(HooksSettings, { api: scope.remote.dshHooksManagement, t }) : null;
           }
           scope.slots.inject('plugins.detail.section', () => scope.slots.register({ name: 'plugins.detail.section', id: 'dsh-hooks-settings', order: 0, locale: 'dsh-hooks' }, HooksSection));

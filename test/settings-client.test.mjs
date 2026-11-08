@@ -39,7 +39,7 @@ before(async () => {
   }; await plugin.apply(ctx);
 });
 after(() => { dom.window.close(); delete globalThis.window; delete globalThis.document; });
-async function mount(subject = { kind: 'bundle', pkg: { name: '@simiooo/dsh-hooks' } }) {
+async function mount(subject = { kind: 'bundle', pkg: { name: '@simooom/dsh-hooks' } }) {
   catalog = sample(); failure = undefined; written = []; switched = []; reads = 0;
   const container = document.createElement('main'); document.body.append(container); const root = createRoot(container);
   await act(async () => root.render(React.createElement(Settings, { subject, t: key => copy.zh[key] })));

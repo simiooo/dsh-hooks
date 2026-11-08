@@ -5,10 +5,10 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add github:simiooo/dsh-hooks
+dsh plugin --profile web add @simooom/dsh-hooks@0.3.0
 ```
 
-把 `web` 换成你的实际 profile。仓库附带编译产物，安装时不需要执行构建脚本。该 profile 需要原生 `shell`、`workingDirectory`、`approval`；权限条还需要 Web/桌面 Client、Typert Gateway 和 conversation UI。验证基线为 Harness **0.2.1-rc.2**；上游接口仍会变化。
+把 `web` 换成你的实际 profile。npm 包附带编译产物，安装时不需要执行构建脚本；开发版也可以通过 `github:simiooo/dsh-hooks` 安装。该 profile 需要原生 `shell`、`workingDirectory`、`approval`；权限条还需要 Web/桌面 Client、Typert Gateway 和 conversation UI。验证基线为 Harness **0.2.1-rc.2**；上游接口仍会变化。
 
 默认读取 `CODEX_HOME`（未设置时为 `~/.codex`）中的 `hooks.json`、`config.toml`，再从当前 Git 项目根目录到会话目录逐层合并 `.codex/hooks.json` 和 `.codex/config.toml`。匹配的处理器累加，不用项目配置覆盖用户配置。
 

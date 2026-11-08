@@ -27,7 +27,7 @@ const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="v
 <script src="/react.js"></script><script src="/react-dom.js"></script><script>window.__ModuleLoader__={load(def){window.hooksPlugin=def.factory(()=>React)}};</script><script src="/client.js"></script>
 <script>let Settings;const api=Object.fromEntries(['catalog','setEnabled','readSource','writeSource'].map(method=>[method,async request=>{const reply=await fetch('/api/'+method,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(request)});return reply.json();}]));
 const ctx={effect:fn=>fn(),inject:(_keys,fn)=>fn(ctx),locale:{register:(_ns,dict)=>{window.t=k=>dict.zh[k];return()=>{}}},slots:{inject:(_name,fn)=>fn(),register:(spec,Comp)=>{if(spec.name==='plugins.detail.section')Settings=Comp;return()=>{}}},remote:{$mount:async()=>()=>{},dshHooksManagement:api}};
-(async()=>{await hooksPlugin.apply(ctx);ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Settings,{subject:{kind:'bundle',pkg:{name:'@simiooo/dsh-hooks'}},t}));})();</script></html>`;
+(async()=>{await hooksPlugin.apply(ctx);ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(Settings,{subject:{kind:'bundle',pkg:{name:'@simooom/dsh-hooks'}},t}));})();</script></html>`;
 const react = dirname(require.resolve('react/package.json')), reactDom = dirname(require.resolve('react-dom/package.json'));
 const server = http.createServer(async (req, res) => {
   try {
