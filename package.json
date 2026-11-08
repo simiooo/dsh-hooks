@@ -1,0 +1,69 @@
+{
+  "name": "@simiooo/dsh-hooks",
+  "version": "0.1.0",
+  "description": "Codex command hooks for DeepSeek Harness, with human approval and hot reload",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:simiooo/dsh-hooks",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./engine": "./dist/engine.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "icon": "./icon.svg",
+  "files": [
+    "dist",
+    "client.js",
+    "locale",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:harness": "npm run build && node scripts/smoke-harness.mjs",
+    "test:visual": "node scripts/preview.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "smol-toml": "^1.6.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-typert-protocol": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "jsdom": "^26.1.0",
+    "playwright-core": "^1.65.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,4 @@
+- insert:
+    - id: simiooo-hooks
+      name: '@simiooo/dsh-hooks'
+      config: {}
