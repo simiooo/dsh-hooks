@@ -75,7 +75,8 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   ctx.llm.registerAdapter(['mock'], adapter);
   let executions = 0;
   ctx.tools.register(tools.defineContentToolFixture({ name: 'echo', description: 'smoke', parameters: { text: { type: 'string' }, nested: { type: 'object', properties: { count: { type: 'integer' } }, additionalProperties: false } }, async execute() { executions++; return [{ type: 'text', text: 'unexpected' }]; } }));
-  await ctx.plugin(Plugin, { discover: false, configPaths: [configPath], pollIntervalMs: 1000 });
+  const hooksFiber = ctx.plugin(Plugin, { discover: false, configPaths: [configPath], pollIntervalMs: 1000 });
+  await hooksFiber;
   const agent = await ctx.agentLoop.create(session.SessionId('hooks-smoke'), { provider: 'mock', model: 'mock' }, { cwd: dir });
   const send = value => agent.followup(llm.createUserMessage({ content: [{ type: 'text', text: value }], source: { kind: 'user' } }));
   send('test hook gates'); await agent.whenIdle();
@@ -86,6 +87,7 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert.deepEqual(rows.filter(r => r.hook_event_name === 'Stop').map(r => r.last_assistant_message), ['first', 'continued']);
   assert.equal(rows[0].cwd, dir);
   assert(JSON.stringify(adapter.requests[0]).includes('startup context'), 'SessionStart context must reach first model request');
+  await invoke('revoke', { sessionId: 'hooks-smoke' });
   // Script-only change: next turn asks again, with no plugin or agent restart.
   await writeFile(scriptPath, (await readFile(scriptPath, 'utf8')) + '\n// changed revision\n');
   send('test reload'); await agent.whenIdle(); assert.equal(asks.length, 2);
@@ -97,7 +99,6 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert.equal(decisions.length, 2); assert(decisions.every(e => e.data.outcome === 'allowed-once'));
   const noInteraction = new Peer(ctx, { principal: { kind: 'owner' }, interactions: 'none' });
   await assert.rejects(invoke('list', { sessionId: 'hooks-smoke' }, noInteraction), /interactive Host owner/);
-  await invoke('revoke', { sessionId: 'hooks-smoke' });
   const { SlotCore } = await hostImport('@deepseek-ai/dsh-client-ui-slots');
   const slots = new SlotCore();
   const removeRoot = slots.register({ name: 'root', children: {
@@ -117,5 +118,8 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   assert.equal(slots.entriesOfSlot('conversation.input.dock').length, 1);
   assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksPermissions').length, 3);
   removeRoot();
-  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'native approval audit', 'real Typert Gateway permission API', 'cross-session answer rejection', 'non-interactive peer rejection', 'session revocation', 'full non-shell arguments', 'tool deny', 'first-request context', 'Stop continuation state and text', 'script hot reload and renewed permission'] }, null, 2));
+  await hooksFiber.dispose();
+  rows = (await readFile(capture, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert(rows.some(row => row.hook_event_name === 'SessionEnd'), 'approved cleanup must run on plugin unload');
+  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'native approval audit', 'real Typert Gateway permission API', 'cross-session answer rejection', 'non-interactive peer rejection', 'session revocation', 'full non-shell arguments', 'tool deny', 'first-request context', 'Stop continuation state and text', 'script hot reload and renewed permission', 'native SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
 } finally { await ctx.fiber.dispose(); protocolResolution.deregister(); await rm(dir, { recursive: true, force: true }); }

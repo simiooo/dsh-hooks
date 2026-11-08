@@ -16,6 +16,8 @@ dsh plugin --profile web add github:simiooo/dsh-hooks
 
 原生审批服务保留 `approval/asked` / `approval/decided` 审计。权限 API 使用 Harness 的认证与资源授权通道，只有具有交互能力的 **Host owner** 可以查看和批准；共享访客不能授权主机代码。无 UI 的 profile 使用原生审批回答器；没有回答器或审批被禁用时拒绝执行。
 
+授权不在会话间继承；子 agent 的工具 hook 在对应子会话中单独审查。
+
 ## 最小示例
 
 `.codex/hooks.json`：
