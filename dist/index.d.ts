@@ -53,6 +53,9 @@ interface Agent {
 interface Context {
     shell: Shell;
     approval: {
+        config?: {
+            policy?: 'ask' | 'never';
+        };
         request(request: {
             agent: Agent;
             toolName: string;

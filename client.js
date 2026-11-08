@@ -10,12 +10,16 @@ window.__ModuleLoader__.load({
       details: 'Review hook commands', scope: 'File and script changes require a new review.',
       permanent: 'Always allow', permissionTitle: 'Hook permissions', permanentScope: 'Saved for this directory and version. New sessions can reuse it.',
       revokeSession: 'Revoke for this session', revokePermanent: 'Revoke always allow', permanentOn: 'Always allowed', permanentOff: 'No permanent permission',
+      skipped: 'Hooks skipped', approvalDisabled: 'Approval is disabled in this mode. Switch to a mode that permits approval and review hooks on your next message. Saved permanent permission can then be reused in full access mode.',
+      notApproved: 'Hooks were not approved and were skipped. Review them on your next message, or disable them in plugin settings.', configError: 'Hook configuration error', repairConfig: 'Repair the configuration in plugin settings. Messages can still be sent.',
       withdrawn: 'Request withdrawn', failed: 'Could not submit. Try again.', cwd: 'Working directory', revoke: 'Revoke hook permissions', disconnected: 'Hook permission connection unavailable',
     };
     const zh = {
       waiting: 'Hooks 待授权', allow: '本会话允许', reject: '拒绝', details: '查看 Hook 命令',
       scope: '配置和脚本变化后重新授权。', permanent: '永久允许', permissionTitle: 'Hooks 授权', permanentScope: '保存此目录、此版本的授权，新会话自动复用。',
       revokeSession: '撤销本会话', revokePermanent: '撤销永久允许', permanentOn: '已永久允许', permanentOff: '未永久允许',
+      skipped: 'Hooks 已跳过', approvalDisabled: '当前模式关闭了审批。切换到可审批模式，下次发送时审查；永久允许可在切回完全权限后复用。',
+      notApproved: 'Hooks 未获授权，已跳过。下次发送时可重新审查，或在插件详情中停用。', configError: 'Hooks 配置错误', repairConfig: '请在插件详情中修复配置，消息仍可正常发送。',
       withdrawn: '请求已撤回', failed: '提交失败，请重试。', cwd: '工作目录', revoke: '管理 Hooks 授权', disconnected: 'Hooks 权限连接不可用',
     };
     Object.assign(en, { hooksTitle: 'Hooks', hooksIntro: 'Lifecycle hooks from configuration and plugins.', learn: 'Learn more', sources: 'From configuration',
@@ -183,22 +187,29 @@ window.__ModuleLoader__.load({
       };
       const disabled = submitting || !pending.answerable;
       return h('section', {
-        className: 'dsh-hooks-permission', 'aria-label': t('waiting'), 'aria-busy': submitting,
+        className: 'dsh-hooks-permission', 'aria-label': t(pending.answerable ? 'waiting' : 'skipped'), 'aria-busy': submitting,
       }, h('style', null, css),
-      h('button', { type: 'button', className: 'dsh-hooks-trigger', title: t('details'), 'aria-label': t('waiting'), 'aria-haspopup': 'dialog', 'aria-expanded': expanded, onClick: () => setExpanded(true) },
-        icon('hook', 15), h('span', { role: 'status' }, t('waiting')), h('small', null, request.hooks.length), icon('chevron', 13)),
+      h('button', { type: 'button', className: 'dsh-hooks-trigger', title: t('details'), 'aria-label': t(pending.answerable ? 'waiting' : 'skipped'), 'aria-haspopup': 'dialog', 'aria-expanded': expanded, onClick: () => setExpanded(true) },
+        icon('hook', 15), h('span', { role: 'status' }, t(pending.answerable ? 'waiting' : 'skipped')), h('small', null, request.hooks.length), icon('chevron', 13)),
       expanded && h(Modal, { open: true, title: t('permissionTitle'), closeLabel: t('close'), onClose: () => { if (!submitting) setExpanded(false); },
         className: 'dsh-hooks-permission-modal', contentClassName: 'dsh-hooks-permission-content',
-        footer: h('div', { className: 'dsh-hooks-permission-actions' },
+        footer: pending.answerable ? h('div', { className: 'dsh-hooks-permission-actions' },
           h(Button, { variant: 'ghost', disabled, onClick: () => { void answer('deny'); } }, t('reject')),
           h(Button, { variant: 'outline', disabled, title: t('permanentScope'), onClick: () => { void answer('allow-permanent'); } }, t('permanent')),
-          h(Button, { variant: 'primary', className: 'dsh-hooks-allow', disabled, onClick: () => { void answer('allow-session'); } }, t('allow'))) },
+          h(Button, { variant: 'primary', className: 'dsh-hooks-allow', disabled, onClick: () => { void answer('allow-session'); } }, t('allow'))) : h(Button, { variant: 'ghost', onClick: () => setExpanded(false) }, t('close')) },
         h('div', { className: 'dsh-hooks-permission-path', title: t('cwd') }, request.cwd),
         h('div', { className: 'dsh-hooks-permission-list', tabIndex: 0, role: 'region', 'aria-label': t('details') }, request.hooks.map((hook, index) => h('div', { className: 'dsh-hooks-permission-hook', key: index },
           h('strong', null, hook.statusMessage || hook.event), h('pre', { className: 'dsh-hooks-permission-command' }, hook.command),
           h('div', { className: 'dsh-hooks-permission-source' }, `${hook.event} · ${hook.source}`)))),
-        h('p', { className: 'dsh-hooks-permission-note' }, t('permanentScope'), ' ', t('scope')),
+        h('p', { className: 'dsh-hooks-permission-note' }, pending.answerable ? `${t('permanentScope')} ${t('scope')}` : pending.note),
         error && h('div', { className: 'dsh-hooks-error', role: 'alert' }, error)));
+    }
+    function ConfigurationNotice({ problem, t }) {
+      const [open, setOpen] = React.useState(false);
+      return h('div', { className: 'dsh-hooks-permission' }, h('style', null, css),
+        h('button', { type: 'button', className: 'dsh-hooks-trigger', 'aria-haspopup': 'dialog', 'aria-expanded': open, onClick: () => setOpen(true) }, icon('warning', 15), t('configError')),
+        open && h(Modal, { open: true, title: t('configError'), closeLabel: t('close'), onClose: () => setOpen(false), className: 'dsh-hooks-permission-modal' },
+          h('p', null, t('repairConfig')), h('div', { className: 'dsh-hooks-error', role: 'alert' }, problem)));
     }
     const descriptors = ['list', 'answer', 'revoke', 'status', 'forget'].map(method => ({
       id: `@simooom/dsh-hooks#permissions.${method}`, service: 'dshHooksPermissions', namespace: 'dshHooksPermissions', method,
@@ -245,6 +256,7 @@ window.__ModuleLoader__.load({
           function SessionPermissionDock({ sessionId, t }) {
             const [request, setRequest] = React.useState(null);
             const [offline, setOffline] = React.useState(false);
+            const [status, setStatus] = React.useState(null);
             const settled = React.useRef(new Set());
             React.useEffect(() => {
               let active = true, timer;
@@ -254,8 +266,8 @@ window.__ModuleLoader__.load({
                   const result = unwrap(await api.list({ sessionId }));
                   if (!active) return;
                   const next = (result.requests ?? []).map(row => parseRequest(row, sessionId)).find(row => row && !settled.current.has(row.id)) ?? null;
-                  setRequest(current => current?.id === next?.id ? current : next); setOffline(false);
-                } catch { if (active) { setOffline(true); setRequest(null); } }
+                  setRequest(current => current?.id === next?.id ? current : next); setStatus(result.status ?? null); setOffline(false);
+                } catch { if (active) { setOffline(true); setRequest(null); setStatus(null); } }
                 finally { if (active) timer = setTimeout(poll, 500); }
               };
               void poll();
@@ -269,9 +281,18 @@ window.__ModuleLoader__.load({
                 settled.current.add(request.id);
                 if (settled.current.size > 512) settled.current.delete(settled.current.values().next().value);
                 setRequest(current => current?.id === request.id ? null : current);
+                setStatus(null);
               },
             } : null, [request, sessionId]);
-            if (!pending) return offline ? h('span', { role: 'status', title: t('disconnected'), 'aria-label': t('disconnected') }, icon('warning', 15)) : null;
+            if (!pending) {
+              if (offline) return h('span', { role: 'status', title: t('disconnected'), 'aria-label': t('disconnected') }, icon('warning', 15));
+              if (typeof status?.problem === 'string') return h(ConfigurationNotice, { problem: status.problem, t });
+              if (status && !status.session) {
+                const review = parseRequest({ ...status, schema: 'dsh-hooks/approval-v1', scope: 'session', id: `status:${status.fingerprint}`, sessionId }, sessionId);
+                if (review) return h(PermissionPanel, { key: `status:${review.fingerprint}`, request: review, t, pending: { answerable: false, note: t(status.approvalPolicy === 'never' ? 'approvalDisabled' : 'notApproved') } });
+              }
+              return null;
+            }
             return h(PermissionPanel, { key: pending.key, pending, request, t });
           }
           function Revoke({ sessionId, t }) {

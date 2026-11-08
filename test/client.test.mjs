@@ -125,3 +125,18 @@ test('revoke is single-shot and a session change ignores old completion', async 
     await view.render('s2'); assert(!dialog()); await act(async () => finish({ ok: true, value: { revoked: true } })); assert(!dialog());
   } finally { await view.cleanup(); }
 });
+test('full-access policy displays a read-only skipped notice without granting permission or hiding the editor', async () => {
+  listOverride = async () => ({ ok: true, value: { requests: [], status: { cwd: '/repo', fingerprint: 'a'.repeat(64), hooks: request().hooks, session: false, permanent: false, approvalPolicy: 'never' } } });
+  const view = await mount([]); try {
+    assert(button('Hooks 已跳过')); await click('Hooks 已跳过'); assert(dialog().textContent.includes('当前模式关闭了审批'));
+    assert(dialog().textContent.includes('node ./guard.mjs')); assert(!button('永久允许')); assert(!button('本会话允许')); assert.equal(answers.length, 0);
+    await click('关闭'); assert.equal(view.container.querySelector('textarea').value, 'kept draft');
+  } finally { await view.cleanup(); }
+});
+test('invalid configuration has a compact repair notice and no executable approval controls', async () => {
+  listOverride = async () => ({ ok: true, value: { requests: [], status: { problem: 'hooks.json: invalid JSON', session: false } } });
+  const view = await mount([]); try {
+    await click('Hooks 配置错误'); assert(dialog().textContent.includes('消息仍可正常发送')); assert(dialog().querySelector('[role=alert]').textContent.includes('invalid JSON'));
+    assert.equal(answers.length, 0); assert(!button('永久允许'));
+  } finally { await view.cleanup(); }
+});

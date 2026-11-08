@@ -245,8 +245,14 @@ export class HooksEngine {
         const state = this.sessions.get(id);
         if (!state || state.closed)
             return { session: false, permanent: false };
-        const snapshot = await this.refresh(id);
-        return { cwd: state.cwd, session: state.approved === state.epoch, permanent: await this.trusted(state.cwd, snapshot) };
+        try {
+            const snapshot = await this.refresh(id);
+            return { cwd: state.cwd, session: state.approved === state.epoch, permanent: await this.trusted(state.cwd, snapshot), fingerprint: snapshot.fingerprint,
+                hooks: snapshot.hooks.map(({ event, command, source, statusMessage }) => ({ event, command, source, ...(statusMessage ? { statusMessage } : {}) })) };
+        }
+        catch (error) {
+            return { cwd: state.cwd, session: false, permanent: false, problem: String(error) };
+        }
     }
     async forget(id) {
         const state = this.state(id), cwd = await this.trust.scope(state.cwd);

@@ -22,7 +22,7 @@ interface Agent {
 }
 interface Context {
   shell: Shell;
-  approval: { request(request: { agent: Agent; toolName: string; reason: string; displayReason?: { en: string; zh: string }; signal: AbortSignal }): Promise<string> };
+  approval: { config?: { policy?: 'ask' | 'never' }; request(request: { agent: Agent; toolName: string; reason: string; displayReason?: { en: string; zh: string }; signal: AbortSignal }): Promise<string> };
   workingDirectory: { defaultDirectory?: string; get?(session: Session): string; ensure(agent: Agent, signal: AbortSignal): Promise<string> };
   logger: { warn(message: string): void };
   on(event: string, callback: (...args: any[]) => any): () => void;
@@ -32,6 +32,7 @@ interface Context {
 interface State {
   source: string; started: boolean; turn: number; continued: number; last: string | null; model: string; cwd?: string;
   continuationIds: Set<string>; interruptedTurn?: number; closing?: boolean;
+  approvalPolicy: 'ask' | 'never';
 }
 const text = (blocks: readonly Block[] = []) => blocks.filter(b => b.type === 'text').map(b => b.text ?? '').join('');
 function contextMessage(context: string[], event: string): Message {
@@ -75,7 +76,8 @@ export function apply(ctx: Context, options: Options = {}): void {
     const { installPermissionApi } = await import('./permissions.js');
     await installPermissionApi(apiCtx, {
       revoke: id => engine.revoke(id), remember: (request, signal) => engine.remember(request, signal),
-      status: id => engine.permissionStatus(id), forget: id => engine.forget(id),
+      status: async id => ({ ...await engine.permissionStatus(id), approvalPolicy: [...states].find(([agent]) => agent.id === id)?.[1].approvalPolicy ?? ctx.approval.config?.policy ?? 'ask' }),
+      forget: id => engine.forget(id),
     });
     const { installManagementApi } = await import('./management-api.js');
     await installManagementApi(apiCtx, manager);
@@ -84,13 +86,14 @@ export function apply(ctx: Context, options: Options = {}): void {
   const stateOf = (agent: Agent): State => {
     let state = states.get(agent);
     if (!state) {
-      state = { source: 'resume', started: false, turn: 0, continued: 0, last: null, model: agent.options?.model ?? '', continuationIds: new Set() };
+      state = { source: 'resume', started: false, turn: 0, continued: 0, last: null, model: agent.options?.model ?? '', continuationIds: new Set(), approvalPolicy: ctx.approval.config?.policy ?? 'ask' };
       states.set(agent, state); bySession.set(agent.session, agent);
       for (const event of agent.session.snapshotEvents()) fold(state, event);
     }
     return state;
   };
   function fold(state: State, event: SessionEvent) {
+    if (event.type === 'approval/policy' && ['ask', 'never'].includes(event.data.policy)) state.approvalPolicy = event.data.policy;
     if (event.type === 'turn/start') { state.turn = event.data.turn; state.continued = 0; state.last = null; state.continuationIds.clear(); delete state.interruptedTurn; }
     if (event.type === 'assistant/message') state.last = text(event.data.message?.content ?? event.data.content ?? []);
     if (event.type === 'request/header') state.model = event.data.header?.config?.model ?? state.model;
@@ -132,10 +135,10 @@ export function apply(ctx: Context, options: Options = {}): void {
     const compactEvent = async (owner: { session: object }, event: 'PreCompact' | 'PostCompact', trigger: 'manual' | 'auto', signal: AbortSignal) => {
       const agent = ownerAgent(owner), state = stateOf(agent);
       const out = await run(agent, event, signal, { trigger, turn_id: trigger === 'manual' ? '' : String(state.turn) }, [trigger], trigger === 'manual');
-      if (out.halt || out.block || out.deferred) {
-        const reason = trigger === 'manual' && out.deferred
-          ? `${out.reason ?? 'Hook permission unavailable.'} Review hooks during a normal input turn before retrying /compact.`
-          : out.reason ?? `${event} stopped compaction`;
+      signal.throwIfAborted();
+      if (out.deferred) { ctx.logger.warn(`${event} skipped: ${out.reason ?? 'Hook permission unavailable.'}`); return; }
+      if (out.halt || out.block) {
+        const reason = out.reason ?? `${event} stopped compaction`;
         ctx.logger.warn(reason);
         agent.cancel({ kind: 'hook', reason }, { keepInbox: true }); throw new Error(reason);
       }
@@ -149,8 +152,10 @@ export function apply(ctx: Context, options: Options = {}): void {
         state.source = 'compact'; state.started = false;
         // Include restoration before overflow retries too, which have no new agent/pre-step.
         const out = await run(agent, 'SessionStart', signal, { source: 'compact' }, ['compact'], trigger === 'manual');
+        signal.throwIfAborted();
         if (!out.deferred) state.started = true;
-        if (out.halt || out.block || out.deferred) {
+        if (out.deferred) { ctx.logger.warn(`SessionStart skipped: ${out.reason ?? 'Hook permission unavailable.'}`); return; }
+        if (out.halt || out.block) {
           const reason = out.reason ?? 'SessionStart stopped continuation after compaction';
           agent.cancel({ kind: 'hook', reason }, { keepInbox: true }); throw new Error(reason);
         }
@@ -194,12 +199,14 @@ export function apply(ctx: Context, options: Options = {}): void {
         outcome = { block: false, halt: false, context: [] };
       } else outcome = await run(agent, 'SessionStart', signal, { source: state.source }, [state.source]);
       if (!outcome.deferred) { state.started = true; engine.retainContexts(agent.id, outcome); }
-      if (outcome.block || outcome.halt) { ctx.logger.warn(outcome.reason ?? 'SessionStart hook stopped this input'); return { kind: 'reject' }; }
+      if (outcome.deferred) ctx.logger.warn(`SessionStart skipped: ${outcome.reason ?? 'Hook permission unavailable.'}`);
+      else if (outcome.block || outcome.halt) { ctx.logger.warn(outcome.reason ?? 'SessionStart hook stopped this input'); return { kind: 'reject' }; }
     }
     const prompts = messages.filter(m => m.source.kind === 'user' || (m.source.kind === 'dsh-hooks' && m.source.event === 'Stop'));
     if (prompts.length) {
       const outcome = await run(agent, 'UserPromptSubmit', signal, { prompt: prompts.map(m => text(m.content)).join('\n') });
-      if (outcome.block || outcome.halt) { ctx.logger.warn(outcome.reason ?? 'UserPromptSubmit hook rejected this input'); return { kind: 'reject' }; }
+      if (outcome.deferred) ctx.logger.warn(`UserPromptSubmit skipped: ${outcome.reason ?? 'Hook permission unavailable.'}`);
+      else if (outcome.block || outcome.halt) { ctx.logger.warn(outcome.reason ?? 'UserPromptSubmit hook rejected this input'); return { kind: 'reject' }; }
       injected.push(...outcome.context);
     }
     const downstream = await next();

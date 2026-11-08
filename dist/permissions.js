@@ -83,10 +83,10 @@ export async function installPermissionApi(ctx, actions) {
                 if (invocation?.peer?.principal?.kind !== 'owner' || invocation.peer.interactions !== 'answer')
                     throw new Error('Only the interactive Host owner may review executable hooks');
             }
-            list(request) {
+            async list(request) {
                 this.owner();
                 const id = sessionId(request);
-                return { requests: [...pending.values()].filter(p => p.request.sessionId === id).map(p => ({ ...p.request, id: p.id })) };
+                return { requests: [...pending.values()].filter(p => p.request.sessionId === id).map(p => ({ ...p.request, id: p.id })), status: await actions.status(id) };
             }
             async answer(request) {
                 this.owner();

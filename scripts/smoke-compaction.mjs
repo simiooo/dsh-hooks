@@ -83,6 +83,7 @@ async function variant(kind, enabled, control = {}) {
     if (enabled && kind !== 'pressure') await loadHooks();
     ctx.on('session/event', (_session, event) => { if (['compaction/start', 'compaction/summary', 'compaction/end'].includes(event.type)) trace.push(event.type); });
     const agent = await ctx.agentLoop.create(session.SessionId('cache-1017'), { provider: 'deepseek-official', model: 'deepseek-flash', maxTokens: 128 }, { cwd: dir });
+    if (control.never) agent.session.append('approval/policy', { policy: 'never' });
     const send = async text => { agent.followup(llm.createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })); await agent.whenIdle(); };
     await send('fixed older history 1017 '.repeat(1500)); prompt = 'native changed prompt version two'; await send('ordinary continuation');
     assert.equal(requests.length, 2, `seeding failed: ${warnings.join('\n')}`);
@@ -107,7 +108,7 @@ async function variant(kind, enabled, control = {}) {
     const summaries = requests.filter(request => request.summary);
     if (control.preStop) assert.equal(summaries.length, 0);
     else assert.equal(summaries.length, 1, `native compaction did not execute once: ${warnings.join('\n')}`);
-    if (enabled) {
+    if (enabled && !control.never) {
       const expected = kind === 'manual' ? 'manual' : 'auto';
       assert.equal(hookInputs.filter(input => input.hook_event_name === 'PreCompact').length, 1);
       assert.equal(hookInputs.find(input => input.hook_event_name === 'PreCompact').trigger, expected);
@@ -117,6 +118,7 @@ async function variant(kind, enabled, control = {}) {
       if (kind === 'manual') assert.equal(hookInputs.find(input => input.hook_event_name === 'PreCompact').turn_id, '');
       else assert.equal(hookInputs.find(input => input.hook_event_name === 'PreCompact').turn_id, '3');
     }
+    if (control.never) assert.equal(hookInputs.length, 0, 'never policy cannot authorize hook execution');
     assert(!JSON.stringify(requests).includes('COMPACT_DIAGNOSTIC_MUST_NOT_ENTER_MODEL'));
     assert(JSON.stringify(requests[1].body.messages).includes('preserved reasoning 1017'), 'reasoning must pass back unchanged');
     if (control.restore) assert(JSON.stringify(requests.at(-1).body.messages).includes('restored after compact'));
@@ -132,6 +134,11 @@ try {
     const baseline = await variant(kind, false), hooked = await variant(kind, true);
     assert.deepEqual(hooked.requests, baseline.requests, `${kind}: hooks changed native DeepSeek request bytes/parameters`);
     console.log(`${kind}: native DeepSeek wire requests identical with/without compact hooks`);
+  }
+  for (const kind of ['manual', 'pressure', 'overflow']) {
+    const baseline = await variant(kind, false, { never: true }), skipped = await variant(kind, true, { never: true });
+    assert.deepEqual(skipped.requests, baseline.requests, `${kind}: skipping unapproved hooks must preserve native requests and chat`);
+    console.log(`${kind}: full-access/never chat + compaction and wire equality passed without executing unapproved hooks`);
   }
   await variant('manual', true, { preStop: true }); await variant('manual', true, { postStop: true });
   await variant('pressure', true, { preStop: true }); await variant('pressure', true, { postStop: true });

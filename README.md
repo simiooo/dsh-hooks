@@ -20,6 +20,8 @@ dsh plugin --profile web add @simooom/dsh-hooks@0.4.0
 
 原生审批服务保留 `approval/asked` / `approval/decided` 审计。权限 API 使用 Harness 的认证与资源授权通道，只有具有交互能力的 **Host owner** 可以查看和批准；共享访客不能授权主机代码。无 UI 的 profile 使用原生审批回答器；没有回答器或审批被禁用时拒绝执行。
 
+「完全权限」预设使用 `approval=never`，会在到达回答器前拒绝新的 hooks 审批。未授权的会话/压缩 hooks 会跳过，消息和原生压缩仍可继续；浮层显示「Hooks 已跳过」及原因。若需运行它们，先切到可审批模式，在同一目录审查并保存永久允许，再切回完全权限。已有效的本会话授权也不会因切换权限模式而丢失。工具前置 hook 未获授权时仍拒绝对应工具；已执行 hook 明确返回的阻断仍生效。
+
 「本会话允许」不在会话间继承；子 agent 使用自己的会话授权，只有与已保存授权的目录、配置和执行策略完全一致时才复用永久允许。
 
 Nuto 输出 `budget_exceeded` 的原因及 DSH 独立配置见 [记忆注入排查](docs/nuto-memory.md)。

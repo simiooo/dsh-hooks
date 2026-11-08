@@ -64,13 +64,22 @@ test('SessionStart context survives prompt rejection and downstream rejection un
   assert.deepEqual(text((await f.pre()).messages), ['hello', 'prompt-context']);
 });
 
-test('SessionStart continue:false rejects once; denied permission remains retryable', async t => {
+test('SessionStart continue:false rejects once; unavailable permission skips hooks without losing the prompt', async t => {
   const f = await fixture(t, { SessionStart: () => json({ continue: false, stopReason: 'initial gate' }) });
   assert.equal((await f.pre()).kind, 'reject'); assert.equal((await f.pre()).kind, 'enter'); assert.equal(f.calls.length, 1);
   let allowed = false;
   const denied = await fixture(t, { SessionStart: () => success('now allowed') }, { authorize: () => allowed ? 'allowed-once' : 'rejected' });
-  assert.equal((await denied.pre()).kind, 'reject'); assert.equal(denied.calls.length, 0); allowed = true;
+  assert.equal((await denied.pre()).kind, 'enter'); assert.equal(denied.calls.length, 0); allowed = true;
   assert(text((await denied.pre()).messages).includes('now allowed')); assert.equal(denied.reviews.length, 2);
+});
+test('rejected, missing and throwing approval never swallow chat; unapproved tool hooks still deny tools', async t => {
+  for (const outcome of ['rejected', 'unavailable', 'throw']) {
+    const f = await fixture(t, { SessionStart: () => success('private startup'), UserPromptSubmit: () => success('private prompt'), PreToolUse: () => success() }, {
+      authorize: () => { if (outcome === 'throw') throw new Error('answerer unavailable'); return outcome; },
+    });
+    const result = await f.pre(); assert.equal(result.kind, 'enter'); assert.deepEqual(text(result.messages), ['hello']);
+    assert.equal(f.calls.length, 0); assert.equal((await f.preTool()).kind, 'deny'); assert.equal(f.calls.length, 0);
+  }
 });
 
 test('SessionStart source and compact lifecycle run even without a fresh user prompt', async t => {

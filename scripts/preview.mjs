@@ -16,11 +16,11 @@ const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="v
 <main><header>DeepSeek Harness · Hooks</header><div id="root"></div></main>
 <style>${native.css}button{font-family:inherit}.native-modal-body{min-width:0}</style><script src="/react.js"></script><script src="/react-dom.js"></script><script>${native.js}</script><script>window.__ModuleLoader__={load(def){window.hooksPlugin=def.factory(name=>name==='react'?React:hooksUi)}};</script><script src="/client.js"></script>
 <script>
-const h=React.createElement; let Dock, Revoke; window.answers=[];window.forgotten=[];
+const h=React.createElement; let Dock, Revoke; window.answers=[];window.forgotten=[];window.permissionStatus=null;
 let requests=[{id:'preview',schema:'dsh-hooks/approval-v1',scope:'session',sessionId:'preview',cwd:'D:/work/project',fingerprint:'a'.repeat(64),hooks:[
 {event:'SessionStart',statusMessage:'加载项目上下文',command:'node ./hooks/context.mjs',source:'.codex/hooks.json'},
 {event:'PreToolUse',statusMessage:'检查待执行命令',command:'node ./hooks/guard.mjs',source:'.codex/hooks.json'}]}];
-const ctx={effect:fn=>fn(),inject:(_keys,fn)=>fn(ctx),locale:{register:(_ns,dict)=>{window.t=k=>dict.zh[k];return()=>{}}},slots:{inject:(_name,fn)=>fn(),register:(spec,Comp)=>{if(spec.name==='conversation.input.dock')Dock=Comp;else if(spec.name==='conversation.input.right')Revoke=Comp;return()=>{}}},remote:{$mount:async()=>()=>{},dshHooksPermissions:{list:async()=>({ok:true,value:{requests}}),answer:async request=>{answers.push(request);requests=[];return{ok:true,value:{accepted:true}}},status:async()=>({ok:true,value:{permanent:true,cwd:'D:/work/project',session:true}}),forget:async request=>{forgotten.push(request);return{ok:true,value:{revoked:true}}},revoke:async()=>({ok:true,value:{revoked:true}})}}};
+const ctx={effect:fn=>fn(),inject:(_keys,fn)=>fn(ctx),locale:{register:(_ns,dict)=>{window.t=k=>dict.zh[k];return()=>{}}},slots:{inject:(_name,fn)=>fn(),register:(spec,Comp)=>{if(spec.name==='conversation.input.dock')Dock=Comp;else if(spec.name==='conversation.input.right')Revoke=Comp;return()=>{}}},remote:{$mount:async()=>()=>{},dshHooksPermissions:{list:async()=>({ok:true,value:{requests,status:permissionStatus}}),answer:async request=>{answers.push(request);requests=[];return{ok:true,value:{accepted:true}}},status:async()=>({ok:true,value:{permanent:true,cwd:'D:/work/project',session:true}}),forget:async request=>{forgotten.push(request);return{ok:true,value:{revoked:true}}},revoke:async()=>({ok:true,value:{revoked:true}})}}};
 (async()=>{await hooksPlugin.apply(ctx);ReactDOM.createRoot(document.getElementById('root')).render(h(React.Fragment,null,h(Dock,{sessionId:'preview',t}),h('div',{className:'composer'},h('textarea',{'aria-label':'message',placeholder:'发送消息',rows:2,defaultValue:'正在编辑的草稿'}),h('footer',null,h('span',null,'DeepSeek V4'),h('div',null,h(Revoke,{sessionId:'preview',t}),h('button',{className:'send','aria-label':'发送'},'↑'))))));})();
 </script></html>`;
 const server = http.createServer(async (req, res) => {
@@ -71,6 +71,12 @@ try {
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   await page.screenshot({ path: new URL('permissions-mobile-dark.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
   await page.getByRole('button', { name: '关闭' }).click(); assert.equal(await page.evaluate(() => answers.length), 1);
+  await page.evaluate(() => { permissionStatus = { ...requests[0], session:false, permanent:false, approvalPolicy:'never' }; requests=[]; });
+  await page.getByRole('button', { name: 'Hooks 已跳过' }).waitFor(); assert.equal(await page.getByRole('dialog').count(), 0);
+  await page.getByRole('textbox', { name:'message' }).fill('未授权时仍可输入和发送');
+  await page.screenshot({ path: new URL('permissions-skipped.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
+  await page.getByRole('button', { name: 'Hooks 已跳过' }).click(); assert.equal(await page.getByRole('button', { name:'永久允许', exact:true }).count(), 0);
+  assert(await page.getByRole('dialog').innerText().then(text=>text.includes('当前模式关闭了审批'))); assert.equal(await page.evaluate(()=>answers.length),1);
   assert.deepEqual(errors, []);
   console.log('Browser QA passed with real Harness Modal/Button/theme: compact trigger, desktop/mobile dialog, focus restoration, permanent approval, revoke and retained draft.');
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

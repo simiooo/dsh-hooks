@@ -60,10 +60,28 @@ export declare class HooksEngine {
         session: boolean;
         permanent: boolean;
         cwd?: never;
+        fingerprint?: never;
+        hooks?: never;
+        problem?: never;
     } | {
         cwd: string;
         session: boolean;
         permanent: boolean;
+        fingerprint: string;
+        hooks: {
+            statusMessage?: string;
+            event: "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PreCompact" | "PostCompact" | "Stop" | "Interrupt" | "SessionEnd";
+            command: string;
+            source: string;
+        }[];
+        problem?: never;
+    } | {
+        cwd: string;
+        session: boolean;
+        permanent: boolean;
+        problem: string;
+        fingerprint?: never;
+        hooks?: never;
     }>;
     forget(id: string): Promise<void>;
     stopWork(id: string): void;
