@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rename, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rename, rm, readFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { HooksEngine } from '../dist/engine.js';
@@ -151,7 +151,7 @@ test('plugin manifests resolve resources, environment, and enforce root confinem
   await writeFile(join(root, 'hooks', 'hooks.json'), JSON.stringify(config('Stop', [hook('node "${PLUGIN_ROOT}/hooks/script.mjs"')])));
   await writeFile(join(root, 'hooks', 'script.mjs'), 'first');
   const one = await loadSnapshot(root, { discover: false, pluginRoots: [root] });
-  assert.equal(one.hooks[0].env.PLUGIN_ROOT, root);
+  assert.equal(one.hooks[0].env.PLUGIN_ROOT, await realpath(root));
   await writeFile(join(root, 'hooks', 'script.mjs'), 'other');
   assert.notEqual((await loadSnapshot(root, { discover: false, pluginRoots: [root] })).fingerprint, one.fingerprint);
   await writeFile(join(root, 'plugin.json'), JSON.stringify({ extensions: { 'com.openai': { hooks: './../outside.json' } } }));
