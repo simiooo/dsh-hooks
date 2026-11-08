@@ -6,7 +6,7 @@ window.__ModuleLoader__.load({
     const { Modal, Button } = require('@deepseek-ai/dsh-client-ui-primitives');
     const h = React.createElement;
     const en = {
-      waiting: 'Hooks need permission', allow: 'Allow for this session', reject: 'Deny',
+      waiting: 'Hooks need permission', allowed: 'Hooks allowed', allow: 'Allow for this session', reject: 'Deny',
       details: 'Review hook commands', scope: 'File and script changes require a new review.',
       permanent: 'Always allow', permissionTitle: 'Hook permissions', permanentScope: 'Saved for this directory and version. New sessions can reuse it.',
       revokeSession: 'Revoke for this session', revokePermanent: 'Revoke always allow', permanentOn: 'Always allowed', permanentOff: 'No permanent permission',
@@ -16,7 +16,7 @@ window.__ModuleLoader__.load({
       withdrawn: 'Request withdrawn', failed: 'Could not submit. Try again.', cwd: 'Working directory', revoke: 'Revoke hook permissions', disconnected: 'Hook permission connection unavailable',
     };
     const zh = {
-      waiting: 'Hooks 待授权', allow: '本会话允许', reject: '拒绝', details: '查看 Hook 命令',
+      waiting: 'Hooks 待授权', allowed: 'Hooks 已允许', allow: '本会话允许', reject: '拒绝', details: '查看 Hook 命令',
       scope: '配置和脚本变化后重新授权。', permanent: '永久允许', permissionTitle: 'Hooks 授权', permanentScope: '保存此目录、此版本的授权，新会话自动复用。',
       revokeSession: '撤销本会话', revokePermanent: '撤销永久允许', permanentOn: '已永久允许', permanentOff: '未永久允许',
       skipped: 'Hooks 已跳过', approvalDisabled: '当前模式关闭了审批。切换到可审批模式，下次发送时审查；永久允许可在切回完全权限后复用。',
@@ -174,19 +174,20 @@ window.__ModuleLoader__.load({
       .dsh-hooks-permission-list{max-height:40dvh;overflow:auto;overscroll-behavior:contain}.dsh-hooks-permission-hook{padding:12px 0}.dsh-hooks-permission-hook+.dsh-hooks-permission-hook{border-top:1px solid var(--dsw-alias-border-l3,#e5e7eb)}.dsh-hooks-permission-hook strong{font-size:13px;font-weight:500}.dsh-hooks-permission-command{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,Consolas,monospace;margin:7px 0}.dsh-hooks-permission-source{font-size:11px;color:var(--dsw-alias-label-tertiary,#777);overflow-wrap:anywhere}
       .dsh-hooks-permission-note{font-size:12px;color:var(--dsw-alias-label-tertiary,#777);margin:14px 0 0}.dsh-hooks-permission-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}.dsh-hooks-error{font-size:12px;color:var(--dsw-alias-status-error,#b42318);margin-top:10px;overflow-wrap:anywhere}
     `;
-    function PermissionPanel({ pending, request, t }) {
+    function PermissionPanel({ pending, request, onForget, t }) {
       const [expanded, setExpanded] = React.useState(false);
       const [submitting, setSubmitting] = React.useState(false);
       const [error, setError] = React.useState('');
       const lock = React.useRef(false);
       const active = React.useRef(true);
       React.useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
-      const answer = async outcome => {
-        if (lock.current || !pending.answerable) return;
+      const perform = async operation => {
+        if (lock.current) return;
         lock.current = true; setSubmitting(true); setError('');
-        try { await pending.answer(outcome); }
+        try { await operation(); if (active.current) { setExpanded(false); setSubmitting(false); lock.current = false; } }
         catch (error) { if (active.current) { lock.current = false; setSubmitting(false); setError(String(error?.message ?? t('failed'))); } }
       };
+      const answer = outcome => pending.answerable ? perform(() => pending.answer(outcome)) : undefined;
       const disabled = submitting || !pending.answerable;
       return h('section', {
         className: 'dsh-hooks-permission', 'aria-label': t(pending.answerable && !pending.manual ? 'waiting' : 'skipped'), 'aria-busy': submitting,
@@ -195,10 +196,11 @@ window.__ModuleLoader__.load({
         icon('hook', 15), h('span', { role: 'status' }, t(pending.answerable && !pending.manual ? 'waiting' : 'skipped')), h('small', null, request.hooks.length), icon('chevron', 13))),
       expanded && h(Modal, { open: true, title: t('permissionTitle'), closeLabel: t('close'), onClose: () => { if (!submitting) setExpanded(false); },
         className: 'dsh-hooks-permission-modal', contentClassName: 'dsh-hooks-permission-content',
-        footer: pending.answerable ? h('div', { className: 'dsh-hooks-permission-actions' },
-          h(Button, { variant: 'ghost', disabled, onClick: () => { void answer('deny'); } }, t('reject')),
-          h(Button, { variant: 'outline', disabled, title: t('permanentScope'), onClick: () => { void answer('allow-permanent'); } }, t('permanent')),
-          h(Button, { variant: 'primary', className: 'dsh-hooks-allow', disabled, onClick: () => { void answer('allow-session'); } }, t('allow'))) : h(Button, { variant: 'ghost', onClick: () => setExpanded(false) }, t('close')) },
+        footer: pending.answerable || onForget ? h('div', { className: 'dsh-hooks-permission-actions' },
+          onForget && h(Button, { variant: 'ghost', disabled: submitting, onClick: () => { void perform(onForget); } }, t('revokePermanent')),
+          pending.answerable && h(Button, { variant: 'ghost', disabled, onClick: () => { void answer('deny'); } }, t('reject')),
+          pending.answerable && h(Button, { variant: 'outline', disabled, title: t('permanentScope'), onClick: () => { void answer('allow-permanent'); } }, t('permanent')),
+          pending.answerable && h(Button, { variant: 'primary', className: 'dsh-hooks-allow', disabled, onClick: () => { void answer('allow-session'); } }, t('allow'))) : h(Button, { variant: 'ghost', onClick: () => setExpanded(false) }, t('close')) },
         h('div', { className: 'dsh-hooks-permission-path', title: t('cwd') }, request.cwd),
         h('div', { className: 'dsh-hooks-permission-list', tabIndex: 0, role: 'region', 'aria-label': t('details') }, request.hooks.map((hook, index) => h('div', { className: 'dsh-hooks-permission-hook', key: index },
           h('strong', null, hook.statusMessage || hook.event), h('pre', { className: 'dsh-hooks-permission-command' }, hook.command),
@@ -288,19 +290,18 @@ window.__ModuleLoader__.load({
                 setStatus(null);
               },
             } : null, [request, sessionId]);
+            const onForget = status?.permanent ? async () => { unwrap(await api.forget({ sessionId })); setStatus(null); setRequest(null); } : undefined;
             if (!pending) {
               if (offline) return h('div', { className: 'dsh-hooks-permission' }, h('style', null, css), h('div', { className: 'dsh-hooks-permission-anchor' }, h('span', { role: 'status', title: t('disconnected'), 'aria-label': t('disconnected') }, icon('warning', 15))));
               if (typeof status?.problem === 'string') return h(ConfigurationNotice, { problem: status.problem, t });
+              if (status?.session && status.hooks?.length) return h(SessionRevoke, { sessionId, t });
               if (status && !status.session) {
                 const review = parseRequest({ ...status, schema: 'dsh-hooks/approval-v1', scope: 'session', id: `status:${status.fingerprint}`, sessionId }, sessionId);
-                if (review) return h(PermissionPanel, { key: `status:${review.fingerprint}`, request: review, t, pending: { answerable: false, note: t(status.approvalPolicy === 'never' ? 'approvalDisabled' : 'notApproved') } });
+                if (review) return h(PermissionPanel, { key: `status:${review.fingerprint}`, request: review, t, onForget, pending: { answerable: false, note: t(status.approvalPolicy === 'never' ? 'approvalDisabled' : 'notApproved') } });
               }
               return null;
             }
-            return h(PermissionPanel, { key: pending.key, pending, request, t });
-          }
-          function Revoke({ sessionId, t }) {
-            return h(SessionRevoke, { key: sessionId, sessionId, t });
+            return h(PermissionPanel, { key: pending.key, pending, request, t, onForget });
           }
           function SessionRevoke({ sessionId, t }) {
             const [busy, setBusy] = React.useState(false);
@@ -319,11 +320,10 @@ window.__ModuleLoader__.load({
               catch (error) { if (alive.current) setError(String(error?.message ?? t('failed'))); }
               finally { lock.current = false; if (alive.current) setBusy(false); }
             };
-            return h(React.Fragment, null, h('style', null, css), h('button', { type: 'button', title: t('revoke'), 'aria-label': t('revoke'), 'aria-haspopup': 'dialog', 'aria-expanded': open,
-              style: { background: 'transparent', color: 'inherit', border: 0, borderRadius: 6, padding: 6, cursor: 'pointer' },
+            return h('section', { className: 'dsh-hooks-permission', 'aria-label': t('allowed') }, h('style', null, css),
+              h('div', { className: 'dsh-hooks-permission-anchor' }, h('button', { type: 'button', className: 'dsh-hooks-trigger', title: t('revoke'), 'aria-label': t('revoke'), 'aria-haspopup': 'dialog', 'aria-expanded': open,
               onClick: () => setOpen(true),
-            }, h('svg', { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true },
-              h('path', { d: 'M12 3 4.5 6v5.5c0 4.4 3 7.8 7.5 9.5 4.5-1.7 7.5-5.1 7.5-9.5V6L12 3Z' }), h('path', { d: 'm9 9 6 6m0-6-6 6' }))),
+            }, icon('hook', 15), h('span', null, t('allowed')), icon('chevron', 13))),
               open && h(Modal, { open: true, title: t('permissionTitle'), closeLabel: t('close'), className: 'dsh-hooks-permission-modal', onClose: () => { if (!busy) setOpen(false); },
                 footer: h('div', { className: 'dsh-hooks-permission-actions' },
                   status?.permanent && h(Button, { variant: 'outline', disabled: busy, onClick: () => { void revoke('forget'); } }, t('revokePermanent')),
@@ -332,7 +332,6 @@ window.__ModuleLoader__.load({
                 error && h('div', { className: 'dsh-hooks-error', role: 'alert' }, error)));
           }
           scope.slots.inject('conversation.input.dock', () => scope.slots.register({ name: 'conversation.input.dock', id: 'dsh-hooks', order: -20, locale: 'dsh-hooks' }, PermissionDock));
-          scope.slots.inject('conversation.input.right', () => scope.slots.register({ name: 'conversation.input.right', id: 'dsh-hooks-revoke', order: -20, locale: 'dsh-hooks' }, Revoke));
         });
       },
     };

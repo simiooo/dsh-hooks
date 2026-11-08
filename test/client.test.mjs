@@ -57,7 +57,7 @@ async function mount(rows = [request()], sessionId = 's1', slot = 'conversation.
   return { container, render, async cleanup() { await act(async () => root.unmount()); container.remove(); listOverride = answerOverride = revokeOverride = undefined; } };
 }
 test('public slots show one compact trigger without commands or permission actions', async () => {
-  assert(registrations.has('conversation.input.dock')); assert(registrations.has('conversation.input.right')); assert(!registrations.has('conversation.composer'));
+  assert(registrations.has('conversation.input.dock')); assert(!registrations.has('conversation.input.right')); assert(!registrations.has('conversation.composer'));
   const view = await mount(); try {
     assert.equal(view.container.querySelectorAll('button').length, 1); assert(!dialog()); assert(!view.container.textContent.includes('node ./guard.mjs')); assert(!button('永久允许'));
     assert(view.container.querySelector('section').compareDocumentPosition(view.container.querySelector('textarea')) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
@@ -90,12 +90,18 @@ test('command markup is escaped and compact hooks are reviewable', async () => {
   try { await click('Hooks 待授权'); assert(!dialog().querySelector('img')); assert(dialog().textContent.includes('PostCompact')); assert(dialog().textContent.includes('<img src=x onerror=alert(1)>')); await click('本会话允许'); assert.equal(answers[0].decision, 'allow-session'); }
   finally { await view.cleanup(); }
 });
-test('revocation modal distinguishes session/permanent permissions for the selected session', async () => {
+test('authorized dock keeps session/permanent revocation available without a toolbar entry', async () => {
   for (const [action, result] of [['撤销本会话', () => revoked], ['撤销永久允许', () => forgotten]]) {
-    const view = await mount([], 's2', 'conversation.input.right');
-    try { await click('管理 Hooks 授权'); assert(dialog().textContent.includes('已永久允许')); await click(action); assert.deepEqual(result(), ['s2']); assert(!dialog()); }
+    listOverride = async () => ({ ok: true, value: { requests: [], status: { session: true, permanent: true, hooks: request().hooks } } });
+    const view = await mount([], 's2');
+    try { assert.equal(view.container.querySelectorAll('button').length, 1); assert(button('管理 Hooks 授权').textContent.includes('Hooks 已允许')); await click('管理 Hooks 授权'); assert(dialog().textContent.includes('已永久允许')); await click(action); assert.deepEqual(result(), ['s2']); assert(!dialog()); }
     finally { await view.cleanup(); }
   }
+  const review = request({ manual: true, id: 'manual:opted-out' });
+  listOverride = async () => ({ ok: true, value: { requests: [], status: { session: false, permanent: true, review } } });
+  const view = await mount([]);
+  try { await click('Hooks 已跳过'); assert(button('永久允许')); await click('撤销永久允许'); assert.deepEqual(forgotten, ['s1']); assert.equal(answers.length, 0); assert(!dialog()); }
+  finally { await view.cleanup(); }
 });
 test('switching session removes an open dialog and ignores late responses', async () => {
   const view = await mount(); let finish;
@@ -119,7 +125,8 @@ test('permanent save failure stays reviewable and supports explicit retry', asyn
   } finally { await view.cleanup(); }
 });
 test('revoke is single-shot and a session change ignores old completion', async () => {
-  const view = await mount([], 's1', 'conversation.input.right'); let finish;
+  listOverride = async () => ({ ok: true, value: { requests: [], status: { session: true, hooks: request().hooks } } });
+  const view = await mount([], 's1'); let finish;
   try {
     revokeOverride = () => new Promise(r => finish = r); await click('管理 Hooks 授权'); const revoke = button('撤销本会话'); await act(async () => { revoke.click(); revoke.click(); }); assert.deepEqual(revoked, ['s1']);
     await view.render('s2'); assert(!dialog()); await act(async () => finish({ ok: true, value: { revoked: true } })); assert(!dialog());

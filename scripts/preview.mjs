@@ -17,12 +17,12 @@ const html = `<!doctype html><html lang="zh"><meta charset="utf-8"><meta name="v
 <style>main{max-width:none}#root{--dsh-composer-card-max-width:720px;--dsh-composer-side-clearance:16px;--dsh-composer-stack-gap:6px;display:flex;flex-direction:column;gap:var(--dsh-composer-stack-gap)}#root[data-layout=hero]{width:min(calc(var(--dsh-composer-card-max-width) + 2 * var(--dsh-composer-side-clearance)),100%);margin-inline:auto}</style>
 <style>${native.css}button{font-family:inherit}.native-modal-body{min-width:0}</style><script src="/react.js"></script><script src="/react-dom.js"></script><script>${native.js}</script><script>window.__ModuleLoader__={load(def){window.hooksPlugin=def.factory(name=>name==='react'?React:hooksUi)}};</script><script src="/client.js"></script>
 <script>
-const h=React.createElement; let Dock, Revoke; window.answers=[];window.forgotten=[];window.permissionStatus=null;
+const h=React.createElement; let Dock; window.answers=[];window.forgotten=[];window.permissionStatus=null;window.registeredSlots=[];
 let requests=[{id:'preview',schema:'dsh-hooks/approval-v1',scope:'session',sessionId:'preview',cwd:'D:/work/project',fingerprint:'a'.repeat(64),hooks:[
 {event:'SessionStart',statusMessage:'加载项目上下文',command:'node ./hooks/context.mjs',source:'.codex/hooks.json'},
 {event:'PreToolUse',statusMessage:'检查待执行命令',command:'node ./hooks/guard.mjs',source:'.codex/hooks.json'}]}];
-const ctx={effect:fn=>fn(),inject:(_keys,fn)=>fn(ctx),locale:{register:(_ns,dict)=>{window.t=k=>dict.zh[k];return()=>{}}},slots:{inject:(_name,fn)=>fn(),register:(spec,Comp)=>{if(spec.name==='conversation.input.dock')Dock=Comp;else if(spec.name==='conversation.input.right')Revoke=Comp;return()=>{}}},remote:{$mount:async()=>()=>{},dshHooksPermissions:{list:async()=>({ok:true,value:{requests,status:permissionStatus}}),answer:async request=>{answers.push(request);requests=[];return{ok:true,value:{accepted:true}}},status:async()=>({ok:true,value:{permanent:true,cwd:'D:/work/project',session:true}}),forget:async request=>{forgotten.push(request);return{ok:true,value:{revoked:true}}},revoke:async()=>({ok:true,value:{revoked:true}})}}};
-(async()=>{await hooksPlugin.apply(ctx);ReactDOM.createRoot(document.getElementById('root')).render(h(React.Fragment,null,h(Dock,{sessionId:'preview',t}),h('div',{className:'native-inputbar-root'},h('div',{className:'composer native-inputbar-card','data-composer-card':''},h('textarea',{'aria-label':'message',placeholder:'发送消息',rows:2,defaultValue:'正在编辑的草稿'}),h('footer',null,h('span',null,'DeepSeek V4'),h('div',null,h(Revoke,{sessionId:'preview',t}),h('button',{className:'send','aria-label':'发送'},'↑')))))));})();
+const ctx={effect:fn=>fn(),inject:(_keys,fn)=>fn(ctx),locale:{register:(_ns,dict)=>{window.t=k=>dict.zh[k];return()=>{}}},slots:{inject:(_name,fn)=>fn(),register:(spec,Comp)=>{registeredSlots.push(spec.name);if(spec.name==='conversation.input.dock')Dock=Comp;return()=>{}}},remote:{$mount:async()=>()=>{},dshHooksPermissions:{list:async()=>({ok:true,value:{requests,status:permissionStatus}}),answer:async request=>{answers.push(request);permissionStatus={...requests[0],session:request.decision!=='deny',permanent:request.decision==='allow-permanent'};requests=[];return{ok:true,value:{accepted:true}}},status:async()=>({ok:true,value:permissionStatus}),forget:async request=>{forgotten.push(request);permissionStatus=null;return{ok:true,value:{revoked:true}}},revoke:async()=>({ok:true,value:{revoked:true}})}}};
+(async()=>{await hooksPlugin.apply(ctx);ReactDOM.createRoot(document.getElementById('root')).render(h(React.Fragment,null,h(Dock,{sessionId:'preview',t}),h('div',{className:'native-inputbar-root'},h('div',{className:'composer native-inputbar-card','data-composer-card':''},h('textarea',{'aria-label':'message',placeholder:'发送消息',rows:2,defaultValue:'正在编辑的草稿'}),h('footer',null,h('span',null,'DeepSeek V4'),h('div',null,h('button',{className:'send','aria-label':'发送'},'↑')))))));})();
 </script></html>`;
 const server = http.createServer(async (req, res) => {
   try {
@@ -39,6 +39,8 @@ try {
   const page = await browser.newPage({ viewport: { width: 1000, height: 760 }, deviceScaleFactor: 1, reducedMotion: 'reduce' });
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`); await page.getByRole('button', { name: 'Hooks 待授权' }).waitFor();
+  assert.equal(await page.evaluate(() => registeredSlots.includes('conversation.input.right')), false);
+  assert.equal(await page.locator('[data-composer-card] [aria-label="管理 Hooks 授权"]').count(), 0);
   assert.equal(await page.getByRole('button', { name: '本会话允许' }).count(), 0);
   const trigger = page.getByRole('button', { name: 'Hooks 待授权' }); const rect = await trigger.boundingBox(); assert(rect.height <= 36 && rect.width < 240);
   async function aligned() {
@@ -77,6 +79,9 @@ try {
   await page.getByRole('button', { name: '永久允许', exact: true }).waitFor({ state: 'hidden' });
   assert.equal(await page.getByRole('textbox', { name: 'message' }).inputValue(), '正在编辑的草稿');
   assert.equal(await page.evaluate(() => answers[0].decision), 'allow-permanent');
+  await page.getByRole('button', { name: '管理 Hooks 授权' }).waitFor();
+  assert.equal(await page.locator('.dsh-hooks-trigger').count(), 1); await aligned();
+  await page.screenshot({ path: new URL('permissions-allowed.png', output).pathname.replace(/^\/([A-Z]:)/, '$1'), fullPage: true });
   await page.getByRole('button', { name: '管理 Hooks 授权' }).click(); await page.getByRole('button', { name: '撤销永久允许' }).click();
   assert.equal(await page.evaluate(() => forgotten[0].sessionId), 'preview');
   await page.evaluate(() => {

@@ -1,11 +1,11 @@
 # DSH Hooks
 
-为 DeepSeek Harness 复用 **Codex command hooks**。支持插件详情中的配置管理、配置和脚本热重载、输入框上方的人类授权，以及会话和永久授权的撤销。当前是 0.4.1，支持下表中的九个事件，**尚未完整覆盖 Codex hooks**。
+为 DeepSeek Harness 复用 **Codex command hooks**。支持插件详情中的配置管理、配置和脚本热重载、输入框上方的人类授权，以及会话和永久授权的撤销。当前是 0.4.2，支持下表中的九个事件，**尚未完整覆盖 Codex hooks**。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add @simooom/dsh-hooks@0.4.1
+dsh plugin --profile web add @simooom/dsh-hooks@0.4.2
 ```
 
 把 `web` 换成你的实际 profile。npm 包附带编译产物，安装时不需要执行构建脚本；开发版也可以通过 `github:simiooo/dsh-hooks` 安装。该 profile 需要原生 `shell`、`workingDirectory`；权限条还需要 Web/桌面 Client、Typert Gateway 和 conversation UI。验证基线为 Harness **0.2.1-rc.2**；上游接口仍会变化。
@@ -16,7 +16,7 @@ dsh plugin --profile web add @simooom/dsh-hooks@0.4.1
 
 「永久允许」将此工作目录、配置及脚本版本的授权保存到 Host 全局的 `~/.dsh/hooks-data/permissions/`，后续会话和 Host 重启后可以复用。使用规范化目录、完整配置/脚本哈希及执行策略匹配；目录、文件、受监视依赖或执行方式变化时重新审查。每个目录独立原子保存，保存失败不会降级为允许。可用 `permissionsDir` 改写存储位置，或通过 `pluginDataRoot` 一起移动。
 
-工具栏盾牌图标打开授权管理：「撤销本会话」暂停当前会话的授权，保留以后会话的永久允许；「撤销永久允许」删除此目录的持久记录，同时取消本 Host 中相同目录的现有授权和待执行任务。其他 Host 进程在下一次检查或轮询时观察撤销。已有可执行进程的停止仍取决于原生 shell 的取消支持。
+授权后，上方浮层显示「Hooks 已允许」，点击可管理授权：「撤销本会话」暂停当前会话的授权，保留以后会话的永久允许；「撤销永久允许」删除此目录的持久记录，同时取消本 Host 中相同目录的现有授权和待执行任务。其他 Host 进程在下一次检查或轮询时观察撤销。已有可执行进程的停止仍取决于原生 shell 的取消支持。
 
 Web/桌面的 hooks 授权独立于 DSH 工具权限模式。无授权时不等待原生工具审批：消息正常发送，未授权 hook 跳过，浮层仍可打开并选择「拒绝」「本会话允许」「永久允许」。完全权限模式同样可操作，无需切换模式。授权从后续事件生效，不补跑已跳过的钩子；工具前置保护和 hook 明确返回的阻断仍保留。
 

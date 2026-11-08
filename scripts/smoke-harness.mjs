@@ -213,6 +213,7 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   };
   await client.apply(clientCtx);
   assert.equal(slots.entriesOfSlot('conversation.input.dock').length, 1);
+  assert.equal(slots.entriesOfSlot('conversation.input.right').length, 0);
   assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksPermissions').length, 5);
   assert.equal(slots.entriesOfSlot('plugins.detail.section').length, 1);
   assert.equal(ctx.typert.remotes.list().filter(d => d.namespace === 'dshHooksManagement').length, 4);
