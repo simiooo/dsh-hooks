@@ -27,6 +27,9 @@ interface Session {
         parentSession?: string;
     };
     snapshotEvents(): readonly SessionEvent[];
+    append?(event: string, data: unknown, intent: {
+        surfaceOp: 'append';
+    }): unknown;
 }
 interface SessionEvent {
     type: string;

@@ -267,3 +267,20 @@ test('background queue overflow skips excess invocations and does not exceed tot
 test('tiny timeout fractions are rounded to a positive millisecond', async t => {
   const f = await fixture(t, config('PreToolUse', [hook('tiny', { timeout: 0.0001 })])); await f.run(); assert.equal(f.calls[0].timeoutMs, 1);
 });
+
+test('compact-only config is reviewed in an ordinary turn and manual maintenance never opens idle approval', async t => {
+  const f = await fixture(t, config('PostCompact', [hook('post')]));
+  const idle = await f.engine.run('session', 'PreCompact', { trigger: 'manual' }, ['manual'], signal(), true);
+  assert(idle.deferred); assert.equal(f.reviews.length, 0); assert.equal(f.calls.length, 0);
+  const start = await f.run('SessionStart'); assert.equal(start.block, false); assert.equal(f.reviews.length, 1); assert.equal(f.calls.length, 0);
+  await f.engine.run('session', 'PreCompact', { trigger: 'manual' }, ['manual'], signal(), true);
+  await f.engine.run('session', 'PostCompact', { trigger: 'manual' }, ['manual'], signal(), true);
+  assert.equal(f.calls.length, 1); assert.equal(f.reviews.length, 1);
+  f.engine.revoke('session'); await f.run('UserPromptSubmit'); assert.equal(f.reviews.length, 2);
+});
+
+test('async compact decisions cannot veto or inject context into the model', async t => {
+  const f = await fixture(t, config('PreCompact', [hook('async', { async: true })]), () => success('{"continue":false,"hookSpecificOutput":{"hookEventName":"PreCompact","additionalContext":"ignored"}}'));
+  const out = await f.run('PreCompact'); assert.equal(out.block || out.halt, false);
+  await new Promise(r => setTimeout(r, 20)); assert.deepEqual(f.engine.takeContexts('session'), []);
+});

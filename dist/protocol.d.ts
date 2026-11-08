@@ -1,5 +1,5 @@
 /** Release behavior baseline: https://learn.chatgpt.com/docs/hooks (2026-11-08). */
-export declare const EVENTS: readonly ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "Interrupt", "SessionEnd"];
+export declare const EVENTS: readonly ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PreCompact", "PostCompact", "Stop", "Interrupt", "SessionEnd"];
 export type EventName = typeof EVENTS[number];
 export type Json = null | boolean | number | string | Json[] | {
     [key: string]: Json;

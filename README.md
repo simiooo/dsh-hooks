@@ -1,6 +1,6 @@
 # DSH Hooks
 
-为 DeepSeek Harness 复用 **Codex command hooks**。支持插件详情中的配置管理、配置和脚本热重载、输入框上方的人类授权，以及会话级撤销。当前是 0.2.0，支持下表中的事件，**尚未完整覆盖 Codex hooks**。
+为 DeepSeek Harness 复用 **Codex command hooks**。支持插件详情中的配置管理、配置和脚本热重载、输入框上方的人类授权，以及会话级撤销。当前是 0.3.0，支持下表中的九个事件，**尚未完整覆盖 Codex hooks**。
 
 ## 安装
 
@@ -94,11 +94,17 @@ config:
 | `UserPromptSubmit` | 拒绝输入、上下文、`continue:false`；忽略 matcher。不会对单纯注入的上下文重复触发。 |
 | `PreToolUse` | 完整参数、deny、legacy block、exit 2、上下文。allow 仍经过宿主后续策略。 |
 | `PostToolUse` | 保留结构化结果（包括 `null`）；block 转为工具反馈；`continue:false` 替换原结果为反馈，模型继续。 |
+| `PreCompact` | 实际摘要处理前运行，matcher 匹配 `manual` / `auto`；`continue:false` 在摘要请求与历史替换前停止。普通 stdout 与 additionalContext 不进入模型。 |
+| `PostCompact` | 历史替换提交后运行，matcher 匹配 `manual` / `auto`；`continue:false` 停止后续继续，保留已提交摘要。不向模型注入上下文。 |
 | `Stop` | block/exit 2 续跑；正确维护 `stop_hook_active` 和最后一条 assistant 文本；`continue:false` 优先。忽略 matcher，仅主会话。 |
 | `Interrupt` | 用户中断的主回合结束后尽快执行；只使用已审查版本，不阻止中断。 |
 | `SessionEnd` | agent 释放或插件卸载时执行清理；只使用已审查版本，强制同步。插件卸载也会触发，这是 Harness 侧的扩展。 |
 
 各事件的触发、取消、错误、并发和重载边界见 [边界矩阵](docs/hook-boundaries.md)，并由协议、引擎、宿主适配和 Client 回归测试覆盖。
+
+压缩事件适配 Harness 原生 `BasicCompactionEngine` 的摘要扩展点，保持原生选择、计价、prune、摘要请求、历史提交与 flush。手动压缩保留同步 maintenance 互斥；没有实际可压缩区间时不运行这两个 hook。其他压缩后端需要提供相同扩展约定。详细时序与 DeepSeek V4.1 / 1017 缓存回归见 [压缩与缓存说明](docs/compaction-and-cache.md)。
+
+配置仅含压缩 hook 时，会在普通输入回合先展示版本审查。空闲 `/compact` 使用已经审查的版本；新配置或重载后的版本需先在普通输入回合批准，避免往回合外写入无效审批记录。DSH 空闲 maintenance 没有活动 turn，手动 payload 的 `turn_id` 为 `""`；自动压缩使用实际活动 turn。主会话成功压缩后按 `PostCompact → SessionStart(source=compact)` 恢复上下文，覆盖不重新进入 pre-step 的超窗重试。
 
 共享输入包含 `session_id`、`transcript_path:null`、`cwd`、`hook_event_name`、实际 model，以及适用事件的 `turn_id`。目前 `permission_mode` 为兼容占位值 `default`，不代表 Harness 当前审批模式。子 agent 的工具事件使用父 `session_id`。
 
@@ -111,7 +117,7 @@ config:
 
 **明确的能力差异：**
 
-- `PermissionRequest`、`PreCompact`、`PostCompact`、`SubagentStart`、`SubagentStop`、`PreModelRequest`、`PostModelRequest` 会输出不支持的诊断；不会伪造等价事件。当前公开拦截点不足以保证它们的 Codex 时序。
+- `PermissionRequest`、`SubagentStart`、`SubagentStop`、`PreModelRequest`、`PostModelRequest` 会输出不支持的诊断；不会伪造等价事件。当前公开拦截点不足以保证它们的 Codex 时序。
 - 只执行 `command`，其他 handler 类型诊断后跳过。没有实现 Codex 的 MCP tool hooks、prompt/agent hooks、管理员配置层和逐插件持久信任 UI。
 - Harness 的工具参数在 pre-execute 前已冻结并记录，无法安全实现 `updatedInput`。有效的改参请求会**拒绝原调用**并说明原因，避免悄悄执行旧参数。Codex 当前不支持的 `ask` 等 PreToolUse 输出按协议诊断，不绕过宿主审批。
 - 为避免错误脚本无限续跑，`Stop` 默认最多继续 10 次，可配置 `maxStopContinuations`。
@@ -139,9 +145,12 @@ npm pack
 ```powershell
 $env:DSH_SOURCE_DIR = 'D:\path\to\deepseek-harness'
 npm run test:harness
+npm run test:compaction
 ```
 
 验证运行真实 Cordis、AgentLoop、shell、原生审批审计和 Typert Gateway，覆盖工具拒绝、完整参数、首轮上下文、PostToolUse 结果替换与继续、Stop 状态、脚本热重载及重新授权、跨会话/错误版本/重复回答拒绝、交互权限和撤销；另验证详情管理 API 的读写、持久开关、过期保存拒绝、访客拒绝及原生详情插槽注册。普通测试另覆盖 UI 操作、并发、超时、异步队列、原子保存和协议边界。
+
+`test:compaction` 使用原生 AgentLoop、BasicCompactionEngine 和 DeepSeek Messages 适配器对回环 SSE 服务测试；对比手动、压力、真实超窗错误重试三条链路启用 hook 前后的完整 HTTP JSON 字节与 beta header，验证工具声明、thinking/signature 和调用能力保留。无实际模型调用，也不把模拟的 cache usage 当作线上命中率测量。
 
 `npm run test:visual` 可在已安装 Edge 的 Windows 上检查真实权限组件的桌面/窄屏布局与交互，截图写入 `.artifacts/`；其他平台通过 `BROWSER_PATH` 指定 Chromium 可执行文件。预览中的外围 composer 是测试夹具。
 

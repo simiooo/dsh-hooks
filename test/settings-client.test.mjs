@@ -8,9 +8,9 @@ import React, { act } from 'react';
 let dom, createRoot, Settings, copy, catalog, failure, written = [], switched = [], reads = 0;
 const scopeId = 'd'.repeat(64), sourceId = 'e'.repeat(64);
 const sample = () => ({ revision: 'f'.repeat(64), scopeId, scopes: [{ id: scopeId, cwd: '/repo' }], issues: [], sources: [{
-  id: sourceId, kind: 'user', path: '/home/.codex/hooks.json', errors: [], issues: ['Unsupported event PreCompact', 'Ignoring additionalContextLimit for Stop'], hooks: [
+  id: sourceId, kind: 'user', path: '/home/.codex/hooks.json', errors: [], issues: ['Unsupported event PreModelRequest', 'Ignoring additionalContextLimit for Stop'], hooks: [
     { id: 'a'.repeat(64), event: 'SessionStart', name: 'Nuto · Restore context', command: 'node ./context.mjs', timeout: 600, async: false, enabled: true, supported: true },
-    { id: 'b'.repeat(64), event: 'PreCompact', name: 'Nuto · Capture memory', command: 'node ./capture.mjs', timeout: 600, async: false, enabled: false, supported: false, problem: 'Unsupported event PreCompact' },
+    { id: 'b'.repeat(64), event: 'PreModelRequest', name: 'Nuto · Capture memory', command: 'node ./capture.mjs', timeout: 600, async: false, enabled: false, supported: false, problem: 'Unsupported event PreModelRequest' },
   ],
 }] });
 before(async () => {
@@ -61,7 +61,7 @@ test('overview matches source cards, counts, problems and explicit refresh', asy
   try {
     assert(view.container.textContent.includes('钩子')); assert(view.container.textContent.includes('用户配置')); assert(view.container.textContent.includes('2 个钩子')); assert(view.container.textContent.includes('2 个问题'));
     await click(view.container.querySelector('[aria-label=刷新钩子]')); assert.equal(reads, 2);
-    await open(view); assert(view.container.querySelector('dialog[open]')); assert(view.container.textContent.includes('所有项目')); assert(view.container.textContent.includes('当前版本未支持 PreCompact'));
+    await open(view); assert(view.container.querySelector('dialog[open]')); assert(view.container.textContent.includes('所有项目')); assert(view.container.textContent.includes('当前版本未支持 PreModelRequest'));
   } finally { await view.cleanup(); }
 });
 

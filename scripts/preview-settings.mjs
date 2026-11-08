@@ -14,8 +14,8 @@ await mkdir(home); await mkdir(join(dir, '.git'));
 const file = join(home, 'hooks.json');
 const handler = (command, statusMessage, extra = {}) => ({ type: 'command', command, statusMessage, timeout: 600, ...extra });
 await writeFile(file, JSON.stringify({ hooks: {
-  PreCompact: [{ hooks: [handler('node ./capture.mjs', 'Nuto · Capture memory before compaction')] }],
-  PostCompact: [{ hooks: [handler('node ./refresh.mjs', 'Nuto · Refresh memory state after compaction')] }],
+  PreCompact: [{ hooks: [handler('node ./capture.mjs', 'Nuto · Capture memory before compaction', { additionalContextLimit: 2000 })] }],
+  PostCompact: [{ hooks: [handler('node ./refresh.mjs', 'Nuto · Refresh memory state after compaction', { additionalContextLimit: 2000 })] }],
   SessionStart: [{ hooks: [handler('node ./context.mjs', 'Nuto · Restore memory after compaction')] }],
   UserPromptSubmit: [{ hooks: [handler('node ./recall.mjs', 'Nuto · Recall memory before prompt')] }],
   Stop: [{ hooks: [handler('node ./stop.mjs', 'Nuto · Capture verified progress', { additionalContextLimit: 2000 })] }],
@@ -56,7 +56,8 @@ try {
   await page.screenshot({ path: join(output, 'settings-overview.png'), fullPage: true });
   await source.click(); await page.getByRole('dialog').waitFor();
   await page.getByRole('button', { name: '展开钩子详情', exact: true }).first().click();
-  assert.equal(await page.getByRole('switch').first().isDisabled(), true);
+  assert.equal(await page.getByRole('switch').first().isDisabled(), false);
+  assert.equal(await page.getByRole('switch').first().getAttribute('aria-checked'), 'true');
   await page.screenshot({ path: join(output, 'settings-detail-desktop.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
@@ -72,5 +73,5 @@ try {
   await page.screenshot({ path: join(output, 'settings-editor-mobile.png'), fullPage: true });
   await page.getByRole('button', { name: '保存', exact: true }).click(); await editor.waitFor({ state: 'hidden' });
   assert((await readFile(file, 'utf8')).includes('node ./revised-context.mjs')); assert.deepEqual(errors, []);
-  console.log('Settings browser QA passed: overview, issues, event details, unsupported controls, narrow layout, native Escape/focus restore, persistent switch, source edit.');
+  console.log('Settings browser QA passed: overview, issues, event details, compact controls enabled, narrow layout, native Escape/focus restore, persistent switch, source edit.');
 } finally { await browser?.close(); await new Promise(r => server.close(r)); await manager.dispose(); await rm(dir, { recursive: true, force: true }); }

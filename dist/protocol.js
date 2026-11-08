@@ -1,5 +1,5 @@
 /** Release behavior baseline: https://learn.chatgpt.com/docs/hooks (2026-11-08). */
-export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd'];
+export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact', 'Stop', 'Interrupt', 'SessionEnd'];
 export const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 export const emptyOutcome = () => ({ block: false, halt: false, context: [] });
 /** Match aliases affect matching only; payloads retain one canonical tool name. */
@@ -30,7 +30,7 @@ export function decode(event, exitCode, stdout, stderr) {
             throw new Error('malformed hook JSON');
         if (event === 'SessionStart' || event === 'UserPromptSubmit')
             return { ...out, context: [text] };
-        if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'SessionEnd')
+        if (['PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact', 'SessionEnd'].includes(event))
             return out;
         throw new Error(`${event} requires JSON output`);
     }
@@ -86,7 +86,7 @@ export function decode(event, exitCode, stdout, stderr) {
         if (typeof raw.stopReason === 'string')
             out.reason = raw.stopReason;
     }
-    else if (event === 'SessionStart') {
+    else if (['SessionStart', 'PreCompact', 'PostCompact'].includes(event)) {
         out.halt = raw.continue === false;
         if (typeof raw.stopReason === 'string')
             out.reason = raw.stopReason;

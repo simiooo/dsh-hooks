@@ -235,7 +235,11 @@ export class HooksEngine {
         if (!this.valid(state, revision) || ownerSignal.aborted)
             return stale();
         const hooks = snapshot.hooks.filter(hook => hook.event === event && matches(hook, subjects));
-        if (!hooks.length)
+        // Review compact-only configurations during an ordinary open turn, where native approval audit is legal.
+        // PreCompact also reviews PostCompact up front, before any compression takes place.
+        const compactReview = ['SessionStart', 'UserPromptSubmit', 'PreCompact'].includes(event)
+            && snapshot.hooks.some(hook => hook.event === 'PreCompact' || hook.event === 'PostCompact');
+        if (!hooks.length && !compactReview)
             return { ...emptyOutcome(), revision: revision.epoch };
         if (!await this.permitted(id, state, revision, ownerSignal, approvedOnly))
             return unavailable(event, 'Hook execution was not approved.');

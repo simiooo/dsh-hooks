@@ -1,5 +1,5 @@
 /** Release behavior baseline: https://learn.chatgpt.com/docs/hooks (2026-11-08). */
-export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd'] as const;
+export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact', 'Stop', 'Interrupt', 'SessionEnd'] as const;
 export type EventName = typeof EVENTS[number];
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export const object = (value: unknown): value is Record<string, unknown> =>
@@ -49,7 +49,7 @@ export function decode(event: EventName, exitCode: number | null, stdout: string
   try { raw = JSON.parse(text); } catch {
     if (text.startsWith('{') || text.startsWith('[')) throw new Error('malformed hook JSON');
     if (event === 'SessionStart' || event === 'UserPromptSubmit') return { ...out, context: [text] };
-    if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'SessionEnd') return out;
+    if (['PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact', 'SessionEnd'].includes(event)) return out;
     throw new Error(`${event} requires JSON output`);
   }
   if (!object(raw)) throw new Error('hook output must be a JSON object');
@@ -86,7 +86,7 @@ export function decode(event: EventName, exitCode: number | null, stdout: string
     out.block = raw.decision === 'block';
     out.halt = raw.continue === false;
     if (typeof raw.stopReason === 'string') out.reason = raw.stopReason;
-  } else if (event === 'SessionStart') {
+  } else if (['SessionStart', 'PreCompact', 'PostCompact'].includes(event)) {
     out.halt = raw.continue === false;
     if (typeof raw.stopReason === 'string') out.reason = raw.stopReason;
   }

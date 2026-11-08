@@ -19,10 +19,10 @@ async function fixture(t, raw = configuration, extension = 'json') {
 }
 
 test('catalog groups real sources and retains unsupported events with disabled controls and diagnostics', async t => {
-  const f = await fixture(t, { hooks: { ...configuration.hooks, PreCompact: [{ hooks: [{ type: 'command', command: 'capture', statusMessage: 'Capture memory' }] }], PostCompact: [{ hooks: [{ type: 'command', command: 'refresh' }] }] } });
+  const f = await fixture(t, { hooks: { ...configuration.hooks, PreModelRequest: [{ hooks: [{ type: 'command', command: 'capture', statusMessage: 'Capture memory' }] }], PostModelRequest: [{ hooks: [{ type: 'command', command: 'refresh' }] }] } });
   const data = await f.manager.catalog(); const source = data.sources[0];
   assert.equal(source.kind, 'custom'); assert.equal(source.path, f.file); assert.equal(source.hooks.length, 4); assert.equal(source.issues.length, 2);
-  assert.deepEqual(source.hooks.filter(row => !row.supported).map(row => [row.event, row.enabled]), [['PreCompact', false], ['PostCompact', false]]);
+  assert.deepEqual(source.hooks.filter(row => !row.supported).map(row => [row.event, row.enabled]), [['PreModelRequest', false], ['PostModelRequest', false]]);
   assert.equal(source.hooks[0].timeout, 10); assert.equal(source.hooks[0].name, 'Review commands');
   assert.equal((await loadSnapshot(f.dir, f.options)).hooks.length, 2);
   await assert.rejects(f.manager.setEnabled(data.scopeId, data.revision, source.hooks.at(-1).id, true), /cannot be enabled/);

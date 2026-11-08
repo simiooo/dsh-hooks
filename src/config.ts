@@ -61,7 +61,7 @@ export function parseHooks(raw: unknown, source: string, env: Record<string, str
         if (rawHook.async !== undefined && typeof rawHook.async !== 'boolean') throw new Error(`${source}: async must be boolean`);
         const limit = rawHook.additionalContextLimit ?? 2500;
         if (typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit < 0) throw new Error(`${source}: invalid additionalContextLimit`);
-        if (rawHook.additionalContextLimit !== undefined && ['Stop', 'Interrupt', 'SessionEnd'].includes(event)) diagnostics.push(`${source}: ignoring additionalContextLimit for ${event}: this event cannot emit additionalContext`);
+        if (rawHook.additionalContextLimit !== undefined && ['Stop', 'Interrupt', 'SessionEnd', 'PreCompact', 'PostCompact'].includes(event)) diagnostics.push(`${source}: ignoring additionalContextLimit for ${event}: this event cannot emit additionalContext`);
         hooks.push({ id: handlerId(source, event, groupIndex, handlerIndex, command, namespace), event: event as EventName, command, async: rawHook.async === true && event !== 'SessionEnd', source, env,
           additionalContextLimit: limit, ...(matcher === undefined ? {} : { matcher: matcher as string }),
           ...(timeout === undefined ? {} : { timeout: timeout as number }),

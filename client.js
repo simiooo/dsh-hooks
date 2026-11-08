@@ -151,7 +151,7 @@ window.__ModuleLoader__.load({
       try {
         if (!value || value.schema !== 'dsh-hooks/approval-v1' || value.scope !== 'session' || value.sessionId !== sessionId || typeof value.id !== 'string' || !value.id
           || typeof value.cwd !== 'string' || typeof value.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(value.fingerprint) || !Array.isArray(value.hooks)
-          || !value.hooks.length || !value.hooks.every(hook => hook && ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd'].includes(hook.event) && typeof hook.command === 'string' && hook.command.trim() && typeof hook.source === 'string')) return null;
+          || !value.hooks.length || !value.hooks.every(hook => hook && ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PreCompact', 'PostCompact', 'Stop', 'Interrupt', 'SessionEnd'].includes(hook.event) && typeof hook.command === 'string' && hook.command.trim() && typeof hook.source === 'string')) return null;
         return value;
       } catch { return null; }
     }

@@ -21,7 +21,7 @@ test('Windows command override and SessionEnd sync semantics are preserved', () 
 });
 
 test('unsupported events and handler types are diagnosed; malformed runnable configs fail', () => {
-  const { diagnostics } = parseHooks({ hooks: { PreCompact: [], Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] } }, 'f');
+  const { diagnostics } = parseHooks({ hooks: { PreModelRequest: [], Stop: [{ hooks: [{ type: 'prompt', prompt: 'x' }] }] } }, 'f');
   assert.equal(diagnostics.length, 2);
   for (const timeout of [-1, 0, Infinity, '30']) assert.throws(() => parseHooks({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x', timeout }] }] } }, 'f'));
   assert.throws(() => parseHooks({ hooks: { PreToolUse: [{ matcher: '[', hooks: [] }] } }, 'f'));
@@ -89,4 +89,15 @@ test('Interrupt and SessionEnd controls are advisory; Stop cannot inject unoffic
 test('timer overflow, malformed executable settings and input rewrites fail before execution', () => {
   for (const timeout of [2_147_484, NaN, Number.MAX_VALUE]) assert.throws(() => parseHooks({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x', timeout }] }] } }, 'f'));
   for (const fields of [{ permissionDecision: 'allow', updatedInput: null }, { permissionDecision: 'deny', updatedInput: {} }, { permissionDecisionReason: 4 }]) assert.throws(() => decode('PreToolUse', 0, specific('PreToolUse', fields), ''));
+});
+
+test('compact events match trigger, ignore stdout/context and only continue:false stops', () => {
+  for (const event of ['PreCompact', 'PostCompact']) {
+    assert(matches({ event, matcher: '^manual$' }, ['manual'])); assert(!matches({ event, matcher: '^manual$' }, ['auto']));
+    assert.deepEqual(decode(event, 0, 'plain diagnostic', '').context, []);
+    assert.equal(decode(event, 0, json({ continue: false, stopReason: 'pause' }), '').halt, true);
+    const out = decode(event, 0, json({ decision: 'block', hookSpecificOutput: { hookEventName: event, additionalContext: 'ignored' } }), '');
+    assert.equal(out.block || out.halt, false); assert.deepEqual(out.context, []); assert.throws(() => decode(event, 2, '', 'not a veto'));
+    assert.throws(() => decode(event, 0, specific('Stop', {}), ''));
+  }
 });

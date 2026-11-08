@@ -98,6 +98,15 @@ test('hook command text is escaped rather than interpreted as HTML', async () =>
     assert(!view.container.querySelector('img')); assert(view.container.textContent.includes('<img src=x onerror=alert(1)>'));
   } finally { await view.cleanup(); }
 });
+
+test('compact-only permissions are reviewable in the native input dock', async () => {
+  const view = await mount([request({ hooks: ['PreCompact', 'PostCompact'].map(event => ({ event, command: 'node ./compact.mjs', source: '/repo/hooks.json' })) })]);
+  try {
+    assert(view.container.querySelector('section'));
+    await act(async () => [...view.container.querySelectorAll('button')].find(b => b.textContent === '本会话允许').click());
+    assert.equal(answers.length, 1); assert.equal(answers[0].decision, 'allow-session');
+  } finally { await view.cleanup(); }
+});
 test('the toolbar icon revokes only the selected Session', async () => {
   const view = await mount([], 's2', 'conversation.input.right');
   try {

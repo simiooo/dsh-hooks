@@ -1,6 +1,6 @@
 # Hook 边界矩阵
 
-实现基线：2026-11-08 的 [Codex Hooks 协议](https://learn.chatgpt.com/docs/hooks)，宿主验证基线 Harness 0.2.1-rc.2。仅覆盖以下七个 command 事件；其他事件有明确诊断，不能据此视为完整兼容。
+实现基线：2026-11-08 的 [Codex Hooks 协议](https://learn.chatgpt.com/docs/hooks)，宿主验证基线 Harness 0.2.1-rc.2。覆盖以下九个 command 事件；其他事件有明确诊断，不能据此视为完整兼容。
 
 ## 事件语义
 
@@ -10,11 +10,13 @@
 | UserPromptSubmit | 待提交的用户消息或 Stop 续跑消息；prompt 取文本，原消息及图片等块不变；忽略 matcher | 纯 stdout / additionalContext；exit 2、decision:block、continue:false 拒绝当前输入批次 | 纯上下文 pre-step 不触发。被拒绝批次的 prompt 上下文不进入下一批；启动上下文继续保留。不自动重提被拒绝的用户输入。 |
 | PreToolUse | 每个有 agent 的工具执行前；完整 tool_input、tool_use_id 和规范化 tool_name | deny / legacy block / exit 2 拒绝原调用；上下文注入。allow 仍经过下游安全策略 | 工具自身尚未执行。updatedInput 在宿主无法改参时拒绝原调用并返回重试说明；deny 优先于改参。无 agent 的执行不拦截，hook shell 不递归触发工具 hook。 |
 | PostToolUse | 工具执行后，成功和错误均可观察；tool_response 保留 JSON 的 null / false / 0 / 空字符串 | block / exit 2 产生工具反馈；continue:false 用 stopReason 替换原结果后让模型继续；可附加上下文 | 无法撤销已产生的工具副作用。替换结果只使用 content，不同时保留结构化 value；下游 block 仍优先。suppressOutput / updatedMCPToolOutput 当前按 Codex 不支持字段诊断，保留正常结果流程。 |
+| PreCompact | 选中有效区间并取得原生压缩锁后、实际摘要请求和历史替换前；trigger 为 manual / auto，matcher 匹配该值 | continue:false 停止；普通 stdout、additionalContext 和 legacy block 不影响模型或历史，exit 2 是非阻断失败 | 空操作、无可压缩区间、繁忙、无效边界不执行；同事务摘要恢复重试只执行一次。手动只复用已审查版本，自动与普通输入可在活动回合审查。锁标记可留下失败尝试，不发生摘要请求或历史替换。 |
+| PostCompact | 原生 compaction/end 成功提交后；对应同次 trigger | continue:false 停止后续继续，保留已提交摘要；不注入上下文 | 摘要或提交失败不执行；提交成功但 flush 失败仍执行一次，同时保留原持久化错误。维护锁内等待完成，之后再运行主会话 SessionStart(source=compact)。取消/卸载不启动新 hook；下一次显式输入仍可恢复已提交压缩的 SessionStart。 |
 | Stop | 主回合准备停止且 inbox 无下一步输入；忽略 matcher；包含 stop_hook_active、最后 assistant 文本或 null | block / exit 2 通过 steer 继续当前回合；continue:false 优先取消，不再 steer | 本插件 continuation 默认每回合最多 10 次；可配置 maxStopContinuations。新回合重置计数及最后文本；事件重放按消息 ID 去重恢复标志。权限失败、配置错误、取消不是续跑决策。 |
 | Interrupt | 主回合由用户中断，turn/end 报告 user abort 后尽快触发；忽略 matcher | 仅通知；控制字段不能重启、阻断或重新开启回合 | 同一 turn 去重；hook / parent / disposed 取消不触发。只使用已审查版本；不弹新审批。默认 1 秒、限制 1–3 秒。 |
 | SessionEnd | 已进入生命周期的主 agent 释放，或插件卸载；reason matcher 当前值 other | 仅清理通知；强制同步，控制字段不影响已结束会话 | dispose 与 unload 重叠只清理一次；使用缓存 cwd，避免退出时重新初始化目录。先停旧任务，再运行已审查且未变化的清理。未审查、已撤销、已改版配置不运行清理。默认 1 秒、限制 1–3 秒。 |
 
-子 agent 仅运行 UserPromptSubmit 和工具事件；SessionStart / Stop / Interrupt / SessionEnd 为主会话事件。子 agent 的工具 payload 使用父 session_id，但执行授权绑定子 agent 自身会话，不能继承主会话授权。
+子 agent 可运行 UserPromptSubmit、工具和压缩事件；SessionStart / Stop / Interrupt / SessionEnd 为主会话事件。子 agent 的工具及压缩 payload 使用父 session_id，但执行授权绑定子 agent 自身会话，不能继承主会话授权。
 
 ## 协议和故障边界
 
@@ -50,8 +52,10 @@
 - `test/host.test.mjs`：七个原生事件适配、首轮上下文、结果替换、Stop 重放与上限、通知去重和子 agent 边界。
 - `test/client.test.mjs` / `test/permissions.test.mjs`：显式回答、会话切换、请求撤回、失败重试、输入法及审批类型校验。
 - `test/management.test.mjs` / `test/settings-client.test.mjs`：插件详情来源、未支持事件、持久启停、过期保存、JSON/TOML 校验、空配置创建、路径约束及管理控件。
+- `test/compaction.test.mjs`：原生维护锁包围、同事务去重、空操作、停止、失败、flush 异常及卸载恢复方法。
 - `npm run test:harness`：真实 Cordis / AgentLoop / shell / Approval / Typert Gateway / SlotCore；含 PostToolUse 替换后模型继续、跨会话/版本/重复回答拒绝和重载再授权。
 - `npm run test:visual`：真实浏览器组件桌面与窄屏 QA；外围 composer 为夹具，不等于完整桌面应用端到端验收。
 - `npm run test:settings`：真实管理存储及浏览器的详情面板、窄屏、键盘焦点、启停及源编辑 QA；外围插件页为夹具。
+- `npm run test:compaction`：原生手动、压力、真实超窗重试与原生 DeepSeek Messages 完整请求字节对照；详见 [压缩与缓存](compaction-and-cache.md)。
 
 Harness 当前没有稳定的 Codex transcript 文件路径、权限模式映射、任意 developer 消息插入及完整结束原因；payload 为 transcript_path:null、permission_mode:default，附加上下文通过 Harness 消息通道注入，SessionEnd reason 为 other。SessionStart 延迟到 pre-step，Interrupt 在原生用户中断完成事件后触发。工具改参、未映射事件、非 command handler 和这些时序差异均为明确兼容缺口。

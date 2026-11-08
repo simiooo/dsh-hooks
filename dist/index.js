@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { HooksEngine } from './engine.js';
 import { HooksManagement } from './management.js';
+import { installCompactionBridge } from './compaction.js';
 export { HooksEngine } from './engine.js';
 export const name = 'simiooo-hooks';
 export const inject = ['shell', 'workingDirectory', 'approval'];
@@ -16,6 +17,7 @@ export function apply(ctx, options = {}) {
     const detached = new Set();
     const closing = new Map();
     const ended = new WeakSet();
+    const compactionBridges = new Set();
     const lifetime = new AbortController();
     const track = (promise) => {
         detached.add(promise);
@@ -111,6 +113,56 @@ export function apply(ctx, options = {}) {
         if (outcome.halt)
             agent.cancel({ kind: 'hook', reason: outcome.reason ?? 'Stopped by hook' }, { keepInbox: true });
     };
+    ctx.inject(['compaction', 'sessions'], async (scope) => {
+        const ownerAgent = (owner) => {
+            const agent = bySession.get(owner.session) ?? owner;
+            if (!agent.id || typeof agent.cancel !== 'function')
+                throw new Error('Compaction hooks require a live Harness agent');
+            stateOf(agent);
+            return agent;
+        };
+        const compactEvent = async (owner, event, trigger, signal) => {
+            const agent = ownerAgent(owner), state = stateOf(agent);
+            const out = await run(agent, event, signal, { trigger, turn_id: trigger === 'manual' ? '' : String(state.turn) }, [trigger], trigger === 'manual');
+            if (out.halt || out.block || out.deferred) {
+                const reason = trigger === 'manual' && out.deferred
+                    ? `${out.reason ?? 'Hook permission unavailable.'} Review hooks during a normal input turn before retrying /compact.`
+                    : out.reason ?? `${event} stopped compaction`;
+                ctx.logger.warn(reason);
+                agent.cancel({ kind: 'hook', reason }, { keepInbox: true });
+                throw new Error(reason);
+            }
+        };
+        const bridge = installCompactionBridge(scope.compaction, {
+            before: (owner, trigger, signal) => compactEvent(owner, 'PreCompact', trigger, signal),
+            after: async (owner, trigger, signal) => {
+                await compactEvent(owner, 'PostCompact', trigger, signal);
+                const agent = ownerAgent(owner), state = stateOf(agent);
+                if (agent.session.header.origin === 'subagent')
+                    return;
+                state.source = 'compact';
+                state.started = false;
+                // Include restoration before overflow retries too, which have no new agent/pre-step.
+                const out = await run(agent, 'SessionStart', signal, { source: 'compact' }, ['compact'], trigger === 'manual');
+                if (!out.deferred)
+                    state.started = true;
+                if (out.halt || out.block || out.deferred) {
+                    const reason = out.reason ?? 'SessionStart stopped continuation after compaction';
+                    agent.cancel({ kind: 'hook', reason }, { keepInbox: true });
+                    throw new Error(reason);
+                }
+                if (out.context.length) {
+                    if (!agent.session.append)
+                        throw new Error('Harness session append is unavailable');
+                    agent.session.append('user/message', contextMessage(out.context, 'SessionStart'), { surfaceOp: 'append' });
+                    if (trigger === 'manual')
+                        await scope.sessions.flush(agent.session);
+                }
+            }, warn: message => ctx.logger.warn(message),
+        });
+        compactionBridges.add(bridge);
+        scope.effect(() => async () => { await bridge.dispose(); compactionBridges.delete(bridge); }, 'dsh-hooks: compaction adapter');
+    });
     ctx.on('agent/created', async ({ agent, source }) => {
         await closing.get(agent.id);
         const state = stateOf(agent);
@@ -123,6 +175,11 @@ export function apply(ctx, options = {}) {
             return;
         const state = stateOf(agent);
         fold(state, event);
+        if (event.type === 'compaction/end' && event.data.error === undefined && !state.closing) {
+            // Remember the committed lifecycle even when PostCompact stops or cancellation prevents its callback.
+            state.source = 'compact';
+            state.started = false;
+        }
         if (event.type === 'turn/end' && !state.closing && state.interruptedTurn !== event.data.turn && event.data.reason?.kind === 'aborted' && event.data.reason?.reason?.kind === 'user' && agent.session.header.origin !== 'subagent') {
             state.interruptedTurn = event.data.turn;
             track(run(agent, 'Interrupt', lifetime.signal, {}, [], true));
@@ -261,6 +318,7 @@ export function apply(ctx, options = {}) {
         track(close(agent)); });
     ctx.effect(() => async () => {
         await manager.dispose();
+        await Promise.allSettled([...compactionBridges].map(bridge => bridge.dispose()));
         await Promise.allSettled([...states.keys()].map(close));
         lifetime.abort();
         await engine.dispose();

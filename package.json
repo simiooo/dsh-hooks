@@ -1,6 +1,6 @@
 {
   "name": "@simiooo/dsh-hooks",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Codex command hooks for DeepSeek Harness, with human approval and hot reload",
   "type": "module",
   "license": "MIT",
@@ -45,6 +45,7 @@
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test test/*.test.mjs",
     "test:harness": "npm run build && node scripts/smoke-harness.mjs",
+    "test:compaction": "npm run build && node scripts/smoke-compaction.mjs",
     "test:visual": "node scripts/preview.mjs",
     "test:settings": "npm run build && node scripts/preview-settings.mjs",
     "prepack": "npm run build"
