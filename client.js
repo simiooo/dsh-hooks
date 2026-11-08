@@ -3,15 +3,20 @@ window.__ModuleLoader__.load({
   id: '@simooom/dsh-hooks',
   factory(require) {
     const React = require('react');
+    const { Modal, Button } = require('@deepseek-ai/dsh-client-ui-primitives');
     const h = React.createElement;
     const en = {
       waiting: 'Hooks need permission', allow: 'Allow for this session', reject: 'Deny',
-      details: 'Review hook commands', scope: 'This session only. File changes require a new review.',
+      details: 'Review hook commands', scope: 'File and script changes require a new review.',
+      permanent: 'Always allow', permissionTitle: 'Hook permissions', permanentScope: 'Saved for this directory and version. New sessions can reuse it.',
+      revokeSession: 'Revoke for this session', revokePermanent: 'Revoke always allow', permanentOn: 'Always allowed', permanentOff: 'No permanent permission',
       withdrawn: 'Request withdrawn', failed: 'Could not submit. Try again.', cwd: 'Working directory', revoke: 'Revoke hook permissions', disconnected: 'Hook permission connection unavailable',
     };
     const zh = {
       waiting: 'Hooks 待授权', allow: '本会话允许', reject: '拒绝', details: '查看 Hook 命令',
-      scope: '仅限本会话；文件变化后重新授权。', withdrawn: '请求已撤回', failed: '提交失败，请重试。', cwd: '工作目录', revoke: '撤销 Hooks 授权', disconnected: 'Hooks 权限连接不可用',
+      scope: '配置和脚本变化后重新授权。', permanent: '永久允许', permissionTitle: 'Hooks 授权', permanentScope: '保存此目录、此版本的授权，新会话自动复用。',
+      revokeSession: '撤销本会话', revokePermanent: '撤销永久允许', permanentOn: '已永久允许', permanentOff: '未永久允许',
+      withdrawn: '请求已撤回', failed: '提交失败，请重试。', cwd: '工作目录', revoke: '管理 Hooks 授权', disconnected: 'Hooks 权限连接不可用',
     };
     Object.assign(en, { hooksTitle: 'Hooks', hooksIntro: 'Lifecycle hooks from configuration and plugins.', learn: 'Learn more', sources: 'From configuration',
       user: 'User configuration', project: 'Project configuration', plugin: 'Plugin configuration', custom: 'Custom configuration', allProjects: 'All projects',
@@ -156,25 +161,12 @@ window.__ModuleLoader__.load({
       } catch { return null; }
     }
     const css = `
-      .dsh-hooks-permission{color:inherit;border-bottom:1px solid color-mix(in srgb,currentColor 16%,transparent);padding:12px 0;margin-bottom:10px;font-size:13px}
-      .dsh-hooks-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-      .dsh-hooks-title{display:flex;align-items:center;gap:8px;min-width:0;flex:1;font-weight:600}
-      .dsh-hooks-count{font-size:11px;font-weight:500;padding:2px 6px;border:1px solid color-mix(in srgb,currentColor 22%,transparent);border-radius:20px}
-      .dsh-hooks-actions{display:flex;gap:8px;align-items:center}
-      .dsh-hooks-permission button{font:inherit;color:inherit;background:transparent;border:1px solid color-mix(in srgb,currentColor 24%,transparent);border-radius:8px;min-height:32px;padding:5px 10px;cursor:pointer}
-      .dsh-hooks-permission button:hover{background:color-mix(in srgb,currentColor 8%,transparent)}
-      .dsh-hooks-permission button:focus-visible,.dsh-hooks-details:focus-visible{outline:2px solid Highlight;outline-offset:3px}
-      .dsh-hooks-permission button:disabled{opacity:.5;cursor:default}
-      .dsh-hooks-permission .dsh-hooks-allow{background:var(--accent,#3155d9);border-color:transparent;color:#fff}
-      .dsh-hooks-permission .dsh-hooks-allow:hover{filter:brightness(1.1)}
-      .dsh-hooks-permission .dsh-hooks-details-button{padding:5px;min-width:32px;line-height:0}
-      .dsh-hooks-scope{margin-top:8px;font-size:12px;opacity:.72}
-      .dsh-hooks-details{max-height:min(35vh,320px);overflow:auto;margin-top:12px;border-top:1px solid color-mix(in srgb,currentColor 16%,transparent);padding-top:10px}
-      .dsh-hooks-command{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;margin:6px 0 10px}
-      .dsh-hooks-source{font-size:11px;opacity:.7;overflow-wrap:anywhere}
-      .dsh-hooks-hook+.dsh-hooks-hook{border-top:1px solid color-mix(in srgb,currentColor 12%,transparent);padding-top:10px;margin-top:10px}
-      .dsh-hooks-error{margin-top:8px;color:var(--text-danger,#b42318)}
-      @media(max-width:480px){.dsh-hooks-actions{width:100%;justify-content:flex-end}.dsh-hooks-details{max-height:28vh}}
+      .dsh-hooks-permission{display:flex;justify-content:flex-start;padding:0 0 8px;color:var(--dsw-alias-label-secondary,inherit);font-family:inherit;font-size:13px;line-height:20px}
+      .dsh-hooks-trigger{display:inline-flex;align-items:center;gap:7px;max-width:100%;padding:6px 10px;border:0;border-radius:var(--dsw-radius-lg,12px);background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-2,#fff));color:inherit;box-shadow:var(--dsw-elevation-prominent,0 2px 10px #00000018);backdrop-filter:var(--dsw-menu-backdrop-filter);font:inherit;cursor:pointer}
+      .dsh-hooks-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,#f3f4f6)}.dsh-hooks-trigger:focus-visible,.dsh-hooks-permission-modal button:focus-visible{outline:2px solid Highlight;outline-offset:3px}.dsh-hooks-trigger small{color:var(--dsw-alias-label-tertiary,#888);font-size:12px}
+      .dsh-hooks-permission-modal{width:min(620px,100%)!important;max-height:100%;color:var(--dsw-alias-label-primary,#202124);font-family:inherit;font-size:14px;line-height:1.5}.dsh-hooks-permission-content{overflow:auto;min-height:0}.dsh-hooks-permission-path{font-size:12px;color:var(--dsw-alias-label-tertiary,#777);overflow-wrap:anywhere;margin:0 0 14px}
+      .dsh-hooks-permission-list{max-height:40dvh;overflow:auto;overscroll-behavior:contain}.dsh-hooks-permission-hook{padding:12px 0}.dsh-hooks-permission-hook+.dsh-hooks-permission-hook{border-top:1px solid var(--dsw-alias-border-l3,#e5e7eb)}.dsh-hooks-permission-hook strong{font-size:13px;font-weight:500}.dsh-hooks-permission-command{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 ui-monospace,Consolas,monospace;margin:7px 0}.dsh-hooks-permission-source{font-size:11px;color:var(--dsw-alias-label-tertiary,#777);overflow-wrap:anywhere}
+      .dsh-hooks-permission-note{font-size:12px;color:var(--dsw-alias-label-tertiary,#777);margin:14px 0 0}.dsh-hooks-permission-actions{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}.dsh-hooks-error{font-size:12px;color:var(--dsw-alias-status-error,#b42318);margin-top:10px;overflow-wrap:anywhere}
     `;
     function PermissionPanel({ pending, request, t }) {
       const [expanded, setExpanded] = React.useState(false);
@@ -182,46 +174,33 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('');
       const lock = React.useRef(false);
       const active = React.useRef(true);
-      const detailsId = React.useId();
       React.useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
       const answer = async outcome => {
         if (lock.current || !pending.answerable) return;
         lock.current = true; setSubmitting(true); setError('');
         try { await pending.answer(outcome); }
-        catch { if (active.current) { lock.current = false; setSubmitting(false); setError(t('failed')); } }
+        catch (error) { if (active.current) { lock.current = false; setSubmitting(false); setError(String(error?.message ?? t('failed'))); } }
       };
       const disabled = submitting || !pending.answerable;
       return h('section', {
         className: 'dsh-hooks-permission', 'aria-label': t('waiting'), 'aria-busy': submitting,
-        onMouseDown: event => event.stopPropagation(),
-        onKeyDown: event => {
-          // No global Enter handler: typing or IME input must never grant permission.
-          if (event.key === 'Escape' && !event.nativeEvent?.isComposing && !event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey) {
-            event.preventDefault(); event.stopPropagation(); void answer('rejected');
-          }
-        },
       }, h('style', null, css),
-      h('div', { className: 'dsh-hooks-row' },
-        h('div', { className: 'dsh-hooks-title', role: 'status' },
-          h('svg', { viewBox: '0 0 24 24', width: 18, height: 18, fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true },
-            h('path', { d: 'M12 3 4.5 6v5.5c0 4.4 3 7.8 7.5 9.5 4.5-1.7 7.5-5.1 7.5-9.5V6L12 3Z' }), h('path', { d: 'M12 8v5m0 3v.1' })),
-          h('span', null, pending.answerable ? t('waiting') : t('withdrawn')),
-          h('span', { className: 'dsh-hooks-count', title: request.fingerprint.slice(0, 12) }, request.hooks.length)),
-        h('div', { className: 'dsh-hooks-actions' },
-          h('button', { type: 'button', className: 'dsh-hooks-details-button', title: t('details'), 'aria-label': t('details'), 'aria-expanded': expanded, 'aria-controls': detailsId, onClick: () => setExpanded(!expanded) },
-            h('svg', { viewBox: '0 0 20 20', width: 18, height: 18, fill: 'none', stroke: 'currentColor', strokeWidth: 1.6, 'aria-hidden': true, style: { transform: expanded ? 'rotate(180deg)' : undefined } }, h('path', { d: 'm5 7.5 5 5 5-5' }))),
-          h('button', { type: 'button', disabled, onClick: () => { void answer('rejected'); } }, t('reject')),
-          h('button', { type: 'button', className: 'dsh-hooks-allow', disabled, onClick: () => { void answer('allowed-once'); } }, t('allow')))),
-      h('div', { className: 'dsh-hooks-scope' }, t('scope')),
-      expanded && h('div', { id: detailsId, className: 'dsh-hooks-details', tabIndex: 0 },
-        h('div', { className: 'dsh-hooks-source' }, `${t('cwd')}: ${request.cwd}`),
-        request.hooks.map((hook, index) => h('div', { className: 'dsh-hooks-hook', key: index },
-          h('strong', null, hook.statusMessage || hook.event),
-          h('pre', { className: 'dsh-hooks-command' }, hook.command),
-          h('div', { className: 'dsh-hooks-source' }, `${hook.event} · ${hook.source}`)))),
-      error && h('div', { className: 'dsh-hooks-error', role: 'alert' }, error));
+      h('button', { type: 'button', className: 'dsh-hooks-trigger', title: t('details'), 'aria-label': t('waiting'), 'aria-haspopup': 'dialog', 'aria-expanded': expanded, onClick: () => setExpanded(true) },
+        icon('hook', 15), h('span', { role: 'status' }, t('waiting')), h('small', null, request.hooks.length), icon('chevron', 13)),
+      expanded && h(Modal, { open: true, title: t('permissionTitle'), closeLabel: t('close'), onClose: () => { if (!submitting) setExpanded(false); },
+        className: 'dsh-hooks-permission-modal', contentClassName: 'dsh-hooks-permission-content',
+        footer: h('div', { className: 'dsh-hooks-permission-actions' },
+          h(Button, { variant: 'ghost', disabled, onClick: () => { void answer('deny'); } }, t('reject')),
+          h(Button, { variant: 'outline', disabled, title: t('permanentScope'), onClick: () => { void answer('allow-permanent'); } }, t('permanent')),
+          h(Button, { variant: 'primary', className: 'dsh-hooks-allow', disabled, onClick: () => { void answer('allow-session'); } }, t('allow'))) },
+        h('div', { className: 'dsh-hooks-permission-path', title: t('cwd') }, request.cwd),
+        h('div', { className: 'dsh-hooks-permission-list', tabIndex: 0, role: 'region', 'aria-label': t('details') }, request.hooks.map((hook, index) => h('div', { className: 'dsh-hooks-permission-hook', key: index },
+          h('strong', null, hook.statusMessage || hook.event), h('pre', { className: 'dsh-hooks-permission-command' }, hook.command),
+          h('div', { className: 'dsh-hooks-permission-source' }, `${hook.event} · ${hook.source}`)))),
+        h('p', { className: 'dsh-hooks-permission-note' }, t('permanentScope'), ' ', t('scope')),
+        error && h('div', { className: 'dsh-hooks-error', role: 'alert' }, error)));
     }
-    const descriptors = ['list', 'answer', 'revoke'].map(method => ({
+    const descriptors = ['list', 'answer', 'revoke', 'status', 'forget'].map(method => ({
       id: `@simooom/dsh-hooks#permissions.${method}`, service: 'dshHooksPermissions', namespace: 'dshHooksPermissions', method,
       invocation: { kind: 'direct' }, parameters: [{ name: 'request', wire: 'request', source: 'json', codec: {
         mode: 'strict', typeSymbol: `@simooom/dsh-hooks#${method}Input`,
@@ -229,7 +208,7 @@ window.__ModuleLoader__.load({
           const keys = method === 'answer' ? ['sessionId', 'id', 'fingerprint', 'decision'] : ['sessionId'];
           if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !keys.includes(k))
             || keys.some(k => typeof value[k] !== 'string' || !value[k])
-            || (method === 'answer' && (!/^[a-f0-9]{64}$/.test(value.fingerprint) || !['allow-session', 'deny'].includes(value.decision)))) throw new TypeError('Invalid hook permission request');
+            || (method === 'answer' && (!/^[a-f0-9]{64}$/.test(value.fingerprint) || !['allow-session', 'allow-permanent', 'deny'].includes(value.decision)))) throw new TypeError('Invalid hook permission request');
           return value;
         } }),
       } }], result: { mode: 'src-json' },
@@ -285,14 +264,14 @@ window.__ModuleLoader__.load({
             const pending = React.useMemo(() => request ? {
               key: request.id, answerable: true,
               async answer(outcome) {
-                unwrap(await api.answer({ sessionId, id: request.id, fingerprint: request.fingerprint, decision: outcome === 'allowed-once' ? 'allow-session' : 'deny' }));
+                unwrap(await api.answer({ sessionId, id: request.id, fingerprint: request.fingerprint, decision: outcome }));
                 // A withdrawn/answered request is final. Ignore stale in-flight list responses.
                 settled.current.add(request.id);
                 if (settled.current.size > 512) settled.current.delete(settled.current.values().next().value);
                 setRequest(current => current?.id === request.id ? null : current);
               },
             } : null, [request, sessionId]);
-            if (!pending) return offline ? h('div', { className: 'dsh-hooks-scope', role: 'status' }, t('disconnected')) : null;
+            if (!pending) return offline ? h('span', { role: 'status', title: t('disconnected'), 'aria-label': t('disconnected') }, icon('warning', 15)) : null;
             return h(PermissionPanel, { key: pending.key, pending, request, t });
           }
           function Revoke({ sessionId, t }) {
@@ -300,13 +279,32 @@ window.__ModuleLoader__.load({
           }
           function SessionRevoke({ sessionId, t }) {
             const [busy, setBusy] = React.useState(false);
-            const [failed, setFailed] = React.useState(false);
-            const lock = React.useRef(false);
-            return h('button', { type: 'button', title: failed ? t('failed') : t('revoke'), 'aria-label': t('revoke'), disabled: busy,
+            const [open, setOpen] = React.useState(false), [status, setStatus] = React.useState(null), [error, setError] = React.useState('');
+            const lock = React.useRef(false), alive = React.useRef(true);
+            React.useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+            React.useEffect(() => {
+              if (!open) return;
+              let active = true; setStatus(null); setError('');
+              void api.status({ sessionId }).then(reply => { if (active) setStatus(unwrap(reply)); }).catch(() => { if (active) setError(t('failed')); });
+              return () => { active = false; };
+            }, [open, sessionId]);
+            const revoke = async method => {
+              if (lock.current) return; lock.current = true; setBusy(true); setError('');
+              try { unwrap(await api[method]({ sessionId })); if (alive.current) setOpen(false); }
+              catch (error) { if (alive.current) setError(String(error?.message ?? t('failed'))); }
+              finally { lock.current = false; if (alive.current) setBusy(false); }
+            };
+            return h(React.Fragment, null, h('style', null, css), h('button', { type: 'button', title: t('revoke'), 'aria-label': t('revoke'), 'aria-haspopup': 'dialog', 'aria-expanded': open,
               style: { background: 'transparent', color: 'inherit', border: 0, borderRadius: 6, padding: 6, cursor: 'pointer' },
-              onClick: async () => { if (lock.current) return; lock.current = true; setBusy(true); try { unwrap(await api.revoke({ sessionId })); setFailed(false); } catch { setFailed(true); } finally { lock.current = false; setBusy(false); } },
+              onClick: () => setOpen(true),
             }, h('svg', { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true },
-              h('path', { d: 'M12 3 4.5 6v5.5c0 4.4 3 7.8 7.5 9.5 4.5-1.7 7.5-5.1 7.5-9.5V6L12 3Z' }), h('path', { d: 'm9 9 6 6m0-6-6 6' })));
+              h('path', { d: 'M12 3 4.5 6v5.5c0 4.4 3 7.8 7.5 9.5 4.5-1.7 7.5-5.1 7.5-9.5V6L12 3Z' }), h('path', { d: 'm9 9 6 6m0-6-6 6' }))),
+              open && h(Modal, { open: true, title: t('permissionTitle'), closeLabel: t('close'), className: 'dsh-hooks-permission-modal', onClose: () => { if (!busy) setOpen(false); },
+                footer: h('div', { className: 'dsh-hooks-permission-actions' },
+                  status?.permanent && h(Button, { variant: 'outline', disabled: busy, onClick: () => { void revoke('forget'); } }, t('revokePermanent')),
+                  h(Button, { variant: 'ghost', disabled: busy || !status, onClick: () => { void revoke('revoke'); } }, t('revokeSession'))) },
+                status ? h(React.Fragment, null, h('div', { className: 'dsh-hooks-permission-path' }, status.cwd), h('p', null, t(status.permanent ? 'permanentOn' : 'permanentOff'))) : h('p', null, t('loading')),
+                error && h('div', { className: 'dsh-hooks-error', role: 'alert' }, error)));
           }
           scope.slots.inject('conversation.input.dock', () => scope.slots.register({ name: 'conversation.input.dock', id: 'dsh-hooks', order: -20, locale: 'dsh-hooks' }, PermissionDock));
           scope.slots.inject('conversation.input.right', () => scope.slots.register({ name: 'conversation.input.right', id: 'dsh-hooks-revoke', order: -20, locale: 'dsh-hooks' }, Revoke));

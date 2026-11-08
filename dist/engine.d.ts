@@ -43,6 +43,7 @@ export declare class HooksEngine {
     private interval;
     private disposal;
     readonly options: Readonly<Options>;
+    private trust;
     constructor(shell: Shell, authorize: Authorize, options?: Options, log?: (message: string) => void);
     start(): void;
     attach(id: string, cwd: string): void;
@@ -52,6 +53,19 @@ export declare class HooksEngine {
     private valid;
     private permitted;
     revoke(id: string): void;
+    private policy;
+    private trusted;
+    remember(request: PermissionRequest, signal: AbortSignal): Promise<void>;
+    permissionStatus(id: string): Promise<{
+        session: boolean;
+        permanent: boolean;
+        cwd?: never;
+    } | {
+        cwd: string;
+        session: boolean;
+        permanent: boolean;
+    }>;
+    forget(id: string): Promise<void>;
     stopWork(id: string): void;
     retainContexts(id: string, outcome: Outcome): void;
     takeContexts(id: string): string[];

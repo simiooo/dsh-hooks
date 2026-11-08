@@ -16,7 +16,7 @@
 | Interrupt | 主回合由用户中断，turn/end 报告 user abort 后尽快触发；忽略 matcher | 仅通知；控制字段不能重启、阻断或重新开启回合 | 同一 turn 去重；hook / parent / disposed 取消不触发。只使用已审查版本；不弹新审批。默认 1 秒、限制 1–3 秒。 |
 | SessionEnd | 已进入生命周期的主 agent 释放，或插件卸载；reason matcher 当前值 other | 仅清理通知；强制同步，控制字段不影响已结束会话 | dispose 与 unload 重叠只清理一次；使用缓存 cwd，避免退出时重新初始化目录。先停旧任务，再运行已审查且未变化的清理。未审查、已撤销、已改版配置不运行清理。默认 1 秒、限制 1–3 秒。 |
 
-子 agent 可运行 UserPromptSubmit、工具和压缩事件；SessionStart / Stop / Interrupt / SessionEnd 为主会话事件。子 agent 的工具及压缩 payload 使用父 session_id，但执行授权绑定子 agent 自身会话，不能继承主会话授权。
+子 agent 可运行 UserPromptSubmit、工具和压缩事件；SessionStart / Stop / Interrupt / SessionEnd 为主会话事件。子 agent 的工具及压缩 payload 使用父 session_id，但执行授权绑定子 agent 自身会话，不能继承主会话的临时授权；同目录、同版本和同执行策略可复用用户显式保存的永久允许。
 
 ## 协议和故障边界
 
@@ -43,7 +43,9 @@
 | async 超过容量 | 每会话最多 8 个运行、256 个待运行；再多的调用跳过并记录诊断。SessionEnd 即使配置 async 也同步执行。 |
 | 权限条会话切换、慢 list 或重复点击 | 立即卸下旧会话控件；迟到响应和已完成请求不能重新显示可授权控件；按钮单次提交。撤回后回答不再有效，网络错误可明确重试。 |
 
-服务端审批 API 同时检查 Host owner、交互能力、会话资源、请求 ID、版本指纹和一次性完成状态。Enter 输入不授权；Escape 只在权限条内部明确拒绝，IME、按键重复和组合键不会提交。权限条是原生 dock 的附加内容，保留原 composer 和草稿。
+服务端审批 API 同时检查 Host owner、交互能力、会话资源、请求 ID、版本指纹和一次性完成状态。最小浮层只打开原生 Modal；输入 Enter 不授权，Escape 仅关闭弹框。批准和拒绝均须显式操作，保留原 composer 和草稿。
+
+永久允许由 Host owner 显式选择，按规范化工作目录保存独立的原子记录，绑定完整快照和执行策略。新会话、插件重启及空闲压缩可复用同一版本；文件/脚本/监视依赖变化后不能复用，间接依赖仍需 watchPaths。写入前后复核配置、取消和会话生命周期；保存失败保留请求供重试。损坏或不可读记录不能授权。撤销当前会话后不会立即被永久记录重新放行；撤销永久允许会清除同目录的当前授权。其他 Host 进程在下一次检查/轮询时观察存储撤销。
 
 ## 验证入口与已知差异
 
@@ -51,10 +53,11 @@
 - `test/engine.test.mjs`：权限、超时、并发、脚本哈希、配置失败、后台生命周期、会话重建及上下文版本。
 - `test/host.test.mjs`：七个原生事件适配、首轮上下文、结果替换、Stop 重放与上限、通知去重和子 agent 边界。
 - `test/client.test.mjs` / `test/permissions.test.mjs`：显式回答、会话切换、请求撤回、失败重试、输入法及审批类型校验。
+- `test/trust.test.mjs`：永久授权跨会话/重启、目录/脚本/执行策略隔离、两种撤销、损坏与保存失败、取消提交。
 - `test/management.test.mjs` / `test/settings-client.test.mjs`：插件详情来源、未支持事件、持久启停、过期保存、JSON/TOML 校验、空配置创建、路径约束及管理控件。
 - `test/compaction.test.mjs`：原生维护锁包围、同事务去重、空操作、停止、失败、flush 异常及卸载恢复方法。
 - `npm run test:harness`：真实 Cordis / AgentLoop / shell / Approval / Typert Gateway / SlotCore；含 PostToolUse 替换后模型继续、跨会话/版本/重复回答拒绝和重载再授权。
-- `npm run test:visual`：真实浏览器组件桌面与窄屏 QA；外围 composer 为夹具，不等于完整桌面应用端到端验收。
+- `DSH_SOURCE_DIR=/path/to/harness npm run test:visual`：读取真实 Harness Modal、Button、焦点/IME 管理和主题，验证桌面/窄屏浮层与弹框、草稿、永久允许和撤销。外围 composer 为夹具，不等于完整桌面应用端到端验收。
 - `npm run test:settings`：真实管理存储及浏览器的详情面板、窄屏、键盘焦点、启停及源编辑 QA；外围插件页为夹具。
 - `npm run test:compaction`：原生手动、压力、真实超窗重试与原生 DeepSeek Messages 完整请求字节对照；详见 [压缩与缓存](compaction-and-cache.md)。
 

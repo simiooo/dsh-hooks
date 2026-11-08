@@ -73,7 +73,10 @@ export function apply(ctx: Context, options: Options = {}): void {
   });
   ctx.inject(['typertGateway'], async apiCtx => {
     const { installPermissionApi } = await import('./permissions.js');
-    await installPermissionApi(apiCtx, id => engine.revoke(id));
+    await installPermissionApi(apiCtx, {
+      revoke: id => engine.revoke(id), remember: (request, signal) => engine.remember(request, signal),
+      status: id => engine.permissionStatus(id), forget: id => engine.forget(id),
+    });
     const { installManagementApi } = await import('./management-api.js');
     await installManagementApi(apiCtx, manager);
   });

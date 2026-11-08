@@ -12,9 +12,16 @@ export function isPermissionRequest(value: unknown): value is PermissionRequest 
 }
 
 /** Host-side human permission queue, exported only through Harness's authenticated Typert Gateway. */
-export async function installPermissionApi(ctx: any, revoke: (sessionId: string) => void): Promise<void> {
+interface PermissionActions {
+  revoke(sessionId: string): void;
+  remember(request: PermissionRequest, signal: AbortSignal): Promise<void>;
+  status(sessionId: string): Promise<unknown>;
+  forget(sessionId: string): Promise<void>;
+}
+type Decision = 'allow-session' | 'allow-permanent' | 'deny';
+export async function installPermissionApi(ctx: any, actions: PermissionActions): Promise<void> {
   const { TypertRemoteService, Remote } = await import('@deepseek-ai/dsh-typert-protocol');
-  type Pending = { id: string; request: PermissionRequest; finish(allowed: boolean): void };
+  type Pending = { id: string; request: PermissionRequest; finish(decision: Decision): Promise<boolean>; cancel(): void };
   const pending = new Map<string, Pending>();
   const sessionId = (request: unknown): string => {
     if (!object(request) || typeof request.sessionId !== 'string' || !request.sessionId) throw new TypeError('sessionId is required');
@@ -33,16 +40,24 @@ export async function installPermissionApi(ctx: any, revoke: (sessionId: string)
       return { requests: [...pending.values()].filter(p => p.request.sessionId === id).map(p => ({ ...p.request, id: p.id })) };
     }
     @Remote({ resources })
-    answer(request: unknown) {
+    async answer(request: unknown) {
       this.owner(); const sid = sessionId(request);
-      if (!object(request) || typeof request.id !== 'string' || !request.id || typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint) || typeof request.decision !== 'string' || !['allow-session', 'deny'].includes(request.decision)) throw new TypeError('invalid hook decision');
+      if (!object(request) || typeof request.id !== 'string' || !request.id || typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint) || typeof request.decision !== 'string' || !['allow-session', 'allow-permanent', 'deny'].includes(request.decision)) throw new TypeError('invalid hook decision');
       const entry = pending.get(request.id);
       if (!entry || entry.request.sessionId !== sid || entry.request.fingerprint !== request.fingerprint) return { accepted: false };
-      entry.finish(request.decision === 'allow-session'); return { accepted: true };
+      return { accepted: await entry.finish(request.decision as Decision) };
     }
     @Remote({ resources })
     revoke(request: unknown) {
-      this.owner(); revoke(sessionId(request)); return { revoked: true };
+      this.owner(); actions.revoke(sessionId(request)); return { revoked: true };
+    }
+    @Remote({ resources })
+    status(request: unknown) {
+      this.owner(); return actions.status(sessionId(request));
+    }
+    @Remote({ resources })
+    async forget(request: unknown) {
+      this.owner(); await actions.forget(sessionId(request)); return { revoked: true };
     }
   }
   new HooksPermissions();
@@ -54,16 +69,26 @@ export async function installPermissionApi(ctx: any, revoke: (sessionId: string)
     const review = request;
     return new Promise<string>(resolve => {
       const id = randomUUID();
-      const finish = (allowed: boolean) => {
+      let saving = false;
+      const settle = (allowed: boolean) => {
         if (!pending.delete(id)) return;
         native.signal?.removeEventListener('abort', abort);
         resolve(allowed ? 'allowed-once' : 'rejected');
       };
-      const abort = () => finish(false);
-      pending.set(id, { id, request: review, finish });
+      const finish = async (decision: Decision): Promise<boolean> => {
+        if (!pending.has(id) || saving) return false;
+        saving = true;
+        try {
+          if (decision === 'allow-permanent') await actions.remember(review, native.signal);
+          if (!pending.has(id) || native.signal?.aborted) return false;
+          settle(decision !== 'deny'); return true;
+        } finally { saving = false; }
+      };
+      const abort = () => settle(false);
+      pending.set(id, { id, request: review, finish, cancel: abort });
       native.signal?.addEventListener('abort', abort, { once: true });
       if (native.signal?.aborted) abort();
     });
   }, { prepend: true });
-  ctx.effect(() => () => { for (const entry of [...pending.values()]) entry.finish(false); }, 'dsh-hooks: withdraw permission requests');
+  ctx.effect(() => () => { for (const entry of [...pending.values()]) entry.cancel(); }, 'dsh-hooks: withdraw permission requests');
 }

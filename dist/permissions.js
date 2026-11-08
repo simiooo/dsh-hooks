@@ -42,8 +42,7 @@ export function isPermissionRequest(value) {
         && EVENTS.includes(hook.event) && typeof hook.command === 'string' && !!hook.command.trim()
         && typeof hook.source === 'string' && (hook.statusMessage === undefined || typeof hook.statusMessage === 'string'));
 }
-/** Host-side human permission queue, exported only through Harness's authenticated Typert Gateway. */
-export async function installPermissionApi(ctx, revoke) {
+export async function installPermissionApi(ctx, actions) {
     const { TypertRemoteService, Remote } = await import('@deepseek-ai/dsh-typert-protocol');
     const pending = new Map();
     const sessionId = (request) => {
@@ -58,15 +57,21 @@ export async function installPermissionApi(ctx, revoke) {
         let _list_decorators;
         let _answer_decorators;
         let _revoke_decorators;
+        let _status_decorators;
+        let _forget_decorators;
         return class HooksPermissions extends _classSuper {
             static {
                 const _metadata = typeof Symbol === "function" && Symbol.metadata ? Object.create(_classSuper[Symbol.metadata] ?? null) : void 0;
                 _list_decorators = [Remote({ resources })];
                 _answer_decorators = [Remote({ resources })];
                 _revoke_decorators = [Remote({ resources })];
+                _status_decorators = [Remote({ resources })];
+                _forget_decorators = [Remote({ resources })];
                 __esDecorate(this, null, _list_decorators, { kind: "method", name: "list", static: false, private: false, access: { has: obj => "list" in obj, get: obj => obj.list }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _answer_decorators, { kind: "method", name: "answer", static: false, private: false, access: { has: obj => "answer" in obj, get: obj => obj.answer }, metadata: _metadata }, null, _instanceExtraInitializers);
                 __esDecorate(this, null, _revoke_decorators, { kind: "method", name: "revoke", static: false, private: false, access: { has: obj => "revoke" in obj, get: obj => obj.revoke }, metadata: _metadata }, null, _instanceExtraInitializers);
+                __esDecorate(this, null, _status_decorators, { kind: "method", name: "status", static: false, private: false, access: { has: obj => "status" in obj, get: obj => obj.status }, metadata: _metadata }, null, _instanceExtraInitializers);
+                __esDecorate(this, null, _forget_decorators, { kind: "method", name: "forget", static: false, private: false, access: { has: obj => "forget" in obj, get: obj => obj.forget }, metadata: _metadata }, null, _instanceExtraInitializers);
                 if (_metadata) Object.defineProperty(this, Symbol.metadata, { enumerable: true, configurable: true, writable: true, value: _metadata });
             }
             constructor() {
@@ -83,20 +88,28 @@ export async function installPermissionApi(ctx, revoke) {
                 const id = sessionId(request);
                 return { requests: [...pending.values()].filter(p => p.request.sessionId === id).map(p => ({ ...p.request, id: p.id })) };
             }
-            answer(request) {
+            async answer(request) {
                 this.owner();
                 const sid = sessionId(request);
-                if (!object(request) || typeof request.id !== 'string' || !request.id || typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint) || typeof request.decision !== 'string' || !['allow-session', 'deny'].includes(request.decision))
+                if (!object(request) || typeof request.id !== 'string' || !request.id || typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint) || typeof request.decision !== 'string' || !['allow-session', 'allow-permanent', 'deny'].includes(request.decision))
                     throw new TypeError('invalid hook decision');
                 const entry = pending.get(request.id);
                 if (!entry || entry.request.sessionId !== sid || entry.request.fingerprint !== request.fingerprint)
                     return { accepted: false };
-                entry.finish(request.decision === 'allow-session');
-                return { accepted: true };
+                return { accepted: await entry.finish(request.decision) };
             }
             revoke(request) {
                 this.owner();
-                revoke(sessionId(request));
+                actions.revoke(sessionId(request));
+                return { revoked: true };
+            }
+            status(request) {
+                this.owner();
+                return actions.status(sessionId(request));
+            }
+            async forget(request) {
+                this.owner();
+                await actions.forget(sessionId(request));
                 return { revoked: true };
             }
         };
@@ -117,20 +130,37 @@ export async function installPermissionApi(ctx, revoke) {
         const review = request;
         return new Promise(resolve => {
             const id = randomUUID();
-            const finish = (allowed) => {
+            let saving = false;
+            const settle = (allowed) => {
                 if (!pending.delete(id))
                     return;
                 native.signal?.removeEventListener('abort', abort);
                 resolve(allowed ? 'allowed-once' : 'rejected');
             };
-            const abort = () => finish(false);
-            pending.set(id, { id, request: review, finish });
+            const finish = async (decision) => {
+                if (!pending.has(id) || saving)
+                    return false;
+                saving = true;
+                try {
+                    if (decision === 'allow-permanent')
+                        await actions.remember(review, native.signal);
+                    if (!pending.has(id) || native.signal?.aborted)
+                        return false;
+                    settle(decision !== 'deny');
+                    return true;
+                }
+                finally {
+                    saving = false;
+                }
+            };
+            const abort = () => settle(false);
+            pending.set(id, { id, request: review, finish, cancel: abort });
             native.signal?.addEventListener('abort', abort, { once: true });
             if (native.signal?.aborted)
                 abort();
         });
     }, { prepend: true });
     ctx.effect(() => () => { for (const entry of [...pending.values()])
-        entry.finish(false); }, 'dsh-hooks: withdraw permission requests');
+        entry.cancel(); }, 'dsh-hooks: withdraw permission requests');
 }
 //# sourceMappingURL=permissions.js.map

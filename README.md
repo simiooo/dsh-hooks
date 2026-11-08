@@ -1,22 +1,28 @@
 # DSH Hooks
 
-为 DeepSeek Harness 复用 **Codex command hooks**。支持插件详情中的配置管理、配置和脚本热重载、输入框上方的人类授权，以及会话级撤销。当前是 0.3.0，支持下表中的九个事件，**尚未完整覆盖 Codex hooks**。
+为 DeepSeek Harness 复用 **Codex command hooks**。支持插件详情中的配置管理、配置和脚本热重载、输入框上方的人类授权，以及会话和永久授权的撤销。当前是 0.4.0，支持下表中的九个事件，**尚未完整覆盖 Codex hooks**。
 
 ## 安装
 
 ```sh
-dsh plugin --profile web add @simooom/dsh-hooks@0.3.0
+dsh plugin --profile web add @simooom/dsh-hooks@0.4.0
 ```
 
 把 `web` 换成你的实际 profile。npm 包附带编译产物，安装时不需要执行构建脚本；开发版也可以通过 `github:simiooo/dsh-hooks` 安装。该 profile 需要原生 `shell`、`workingDirectory`、`approval`；权限条还需要 Web/桌面 Client、Typert Gateway 和 conversation UI。验证基线为 Harness **0.2.1-rc.2**；上游接口仍会变化。
 
 默认读取 `CODEX_HOME`（未设置时为 `~/.codex`）中的 `hooks.json`、`config.toml`，再从当前 Git 项目根目录到会话目录逐层合并 `.codex/hooks.json` 和 `.codex/config.toml`。匹配的处理器累加，不用项目配置覆盖用户配置。
 
-首次触发时，输入框上方显示授权条。展开后可以查看**所有可执行命令、事件、来源文件和工作目录**。点击「本会话允许」才执行；「拒绝」不运行命令。授权绑定当前会话与文件内容版本，不写入永久白名单。工具栏盾牌图标可随时撤销。
+首次触发时，输入框上方仅显示「Hooks 待授权」浮层和数量。点击后，在 Harness 原生弹框中审查**所有可执行命令、事件、来源文件和工作目录**，再选择「拒绝」「本会话允许」或「永久允许」。关闭或按 Escape 只收起弹框，不代替用户作答，不影响输入草稿。
+
+「永久允许」将此工作目录、配置及脚本版本的授权保存到 Host 全局的 `~/.dsh/hooks-data/permissions/`，后续会话和 Host 重启后可以复用。使用规范化目录、完整配置/脚本哈希及执行策略匹配；目录、文件、受监视依赖或执行方式变化时重新审查。每个目录独立原子保存，保存失败不会降级为允许。可用 `permissionsDir` 改写存储位置，或通过 `pluginDataRoot` 一起移动。
+
+工具栏盾牌图标打开授权管理：「撤销本会话」暂停当前会话的授权，保留以后会话的永久允许；「撤销永久允许」删除此目录的持久记录，同时取消本 Host 中相同目录的现有授权和待执行任务。其他 Host 进程在下一次检查或轮询时观察撤销。已有可执行进程的停止仍取决于原生 shell 的取消支持。
 
 原生审批服务保留 `approval/asked` / `approval/decided` 审计。权限 API 使用 Harness 的认证与资源授权通道，只有具有交互能力的 **Host owner** 可以查看和批准；共享访客不能授权主机代码。无 UI 的 profile 使用原生审批回答器；没有回答器或审批被禁用时拒绝执行。
 
-授权不在会话间继承；子 agent 的工具 hook 在对应子会话中单独审查。
+「本会话允许」不在会话间继承；子 agent 使用自己的会话授权，只有与已保存授权的目录、配置和执行策略完全一致时才复用永久允许。
+
+Nuto 输出 `budget_exceeded` 的原因及 DSH 独立配置见 [记忆注入排查](docs/nuto-memory.md)。
 
 ## 在插件详情中配置
 

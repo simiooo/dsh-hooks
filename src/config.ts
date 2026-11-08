@@ -21,6 +21,8 @@ export interface Options {
   pluginDataRoot?: string;
   /** Host-local persistent switches; Codex source files keep their original format. */
   controlsPath?: string;
+  /** Host-local durable grants, one atomic record per canonical working directory. */
+  permissionsDir?: string;
 }
 export interface HookView {
   id: string; event: string; name: string; command: string; timeout: number; async: boolean;

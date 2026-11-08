@@ -22,7 +22,7 @@ before(async () => {
     effect: init => init(), inject: (_deps, init) => init(ctx), locale: { register(_ns, dictionaries) { copy = dictionaries; return () => {}; } },
     slots: { inject(_name, init) { init(); }, register(spec, Component) { if (spec.name === 'plugins.detail.section') Settings = Component; return () => {}; } },
     remote: { async $mount(contribution) {
-      assert.equal(contribution.descriptors.length, 7);
+      assert.equal(contribution.descriptors.length, 9);
       const codec = contribution.descriptors.find(d => d.method === 'setEnabled').parameters[0].codec.create();
       assert.throws(() => codec.parse({ scopeId, revision: 'f'.repeat(64), id: 'a'.repeat(64), enabled: 'false' }));
       assert.equal(codec.parse({ scopeId, revision: 'f'.repeat(64), id: 'a'.repeat(64), enabled: false }).enabled, false);

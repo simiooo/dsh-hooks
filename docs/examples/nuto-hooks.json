@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "nuto hook prompt --env staging --data-only --budget 6000", "timeout": 20, "additionalContextLimit": 6000, "statusMessage": "Nuto · Recall memory before prompt" }] }],
+    "SessionStart": [{ "matcher": "compact", "hooks": [{ "type": "command", "command": "nuto hook compact --env staging --data-only --budget 6000", "timeout": 20, "additionalContextLimit": 6000, "statusMessage": "Nuto · Restore memory after compaction" }] }],
+    "PreCompact": [{ "hooks": [{ "type": "command", "command": "nuto hook stop --env staging --capture-only", "timeout": 600, "statusMessage": "Nuto · Capture memory before compaction" }] }],
+    "PostCompact": [{ "hooks": [{ "type": "command", "command": "nuto hook compact --env staging --data-only --budget 6000", "timeout": 20, "statusMessage": "Nuto · Refresh memory state after compaction" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "nuto hook stop --env staging --capture-only", "timeout": 10, "statusMessage": "Nuto · Capture memory at turn end" }] }]
+  }
+}

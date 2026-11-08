@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { loadSnapshot, sha, type Options, type Snapshot } from './config.js';
 import { decode, emptyOutcome, matches, merge, type EventName, type Hook, type Outcome } from './protocol.js';
+import { PermanentTrust } from './trust.js';
 
 export interface ShellResult {
   exitCode: number | null; timedOut?: boolean; aborted?: boolean;
@@ -24,7 +25,7 @@ interface PendingApproval {
 interface SessionState {
   cwd: string; snapshot?: Snapshot; error?: Error; revision: AbortController; epoch: number;
   life: AbortController; closed: boolean; draining?: Promise<void>;
-  approved?: number | undefined; refresh?: Promise<Snapshot>; pending?: PendingApproval;
+  approved?: number | undefined; permanent?: boolean; ignorePermanent?: boolean; refresh?: Promise<Snapshot>; pending?: PendingApproval;
   active: Set<Promise<unknown>>; queued: (() => void)[]; background: number;
   contexts: { revision: number; text: string }[];
 }
@@ -48,6 +49,7 @@ export class HooksEngine {
   private interval: ReturnType<typeof setInterval> | undefined;
   private disposal: Promise<void> | undefined;
   readonly options: Readonly<Options>;
+  private trust: PermanentTrust;
   constructor(private shell: Shell, private authorize: Authorize, options: Options = {}, private log: (message: string) => void = () => {}) {
     const copy = structuredClone(options);
     for (const [key, value] of Object.entries(copy)) {
@@ -60,6 +62,7 @@ export class HooksEngine {
     }
     if (copy.shellFlavor !== undefined && !['auto', 'posix', 'powershell'].includes(copy.shellFlavor)) throw new TypeError('invalid shellFlavor');
     this.options = Object.freeze(copy);
+    this.trust = new PermanentTrust(this.options);
   }
   start(): void {
     if (this.lifetime.signal.aborted) throw new Error('hooks engine disposed');
@@ -82,7 +85,7 @@ export class HooksEngine {
     const state = this.sessions.get(id); if (!state) throw new Error(`hooks session not attached: ${id}`); return state;
   }
   private invalidate(state: SessionState, reason: string): void {
-    state.epoch++; state.approved = undefined; state.contexts.length = 0; state.queued.length = 0;
+    state.epoch++; state.approved = undefined; state.permanent = false; state.contexts.length = 0; state.queued.length = 0;
     state.revision.abort(new Error(reason)); state.pending?.controller.abort(new Error(reason));
     state.revision = new AbortController();
   }
@@ -103,6 +106,7 @@ export class HooksEngine {
             snapshot.diagnostics.forEach(this.log);
           }
           delete state.error;
+          if (state.permanent && !await this.trusted(cwd, snapshot)) this.invalidate(state, 'permanent hook permission revoked');
           return state.snapshot!;
         } catch (error) {
           if (state.closed) throw error;
@@ -121,7 +125,12 @@ export class HooksEngine {
   }
   private async permitted(id: string, state: SessionState, revision: Revision, signal: AbortSignal, approvedOnly: boolean): Promise<boolean> {
     if (!this.valid(state, revision) || signal.aborted) return false;
-    if (state.approved === revision.epoch) return true;
+    if (state.approved === revision.epoch && !state.permanent) return true;
+    if (!state.ignorePermanent && await this.trusted(revision.cwd, revision.snapshot)) {
+      if (!this.valid(state, revision) || signal.aborted) return false;
+      state.approved = revision.epoch; state.permanent = true; return true;
+    }
+    if (!this.valid(state, revision) || signal.aborted) return false;
     if (approvedOnly) return false;
     let pending = state.pending;
     if (!pending || pending.revision !== revision.epoch || pending.controller.signal.aborted) {
@@ -137,10 +146,11 @@ export class HooksEngine {
       entry.promise = (async () => {
         try {
           const allowed = await abortable(Promise.resolve().then(() => { approvalSignal.throwIfAborted(); return this.authorize(request, approvalSignal); }), approvalSignal);
+          if (!allowed && !approvalSignal.aborted && this.valid(state, revision)) state.ignorePermanent = true;
           if (!allowed || approvalSignal.aborted || !this.valid(state, revision)) return false;
           await abortable(this.refresh(id), approvalSignal);
           if (approvalSignal.aborted || !this.valid(state, revision)) return false;
-          state.approved = revision.epoch; return true;
+          state.approved = revision.epoch; state.permanent = !state.ignorePermanent && await this.trusted(revision.cwd, revision.snapshot); return true;
         } catch (error) {
           if (!approvalSignal.aborted) this.log(`Hook permission unavailable: ${String(error)}`);
           return false;
@@ -159,12 +169,45 @@ export class HooksEngine {
       if (!pending.waiters && !pending.settled) pending.controller.abort(new Error('no active hook permission waiters'));
     }
   }
-  revoke(id: string): void { const state = this.sessions.get(id); if (state && !state.closed) this.invalidate(state, 'hook permission revoked'); }
+  revoke(id: string): void { const state = this.sessions.get(id); if (state && !state.closed) { state.ignorePermanent = true; this.invalidate(state, 'hook permission revoked'); } }
+  private policy(snapshot: Snapshot): string {
+    return sha(JSON.stringify([snapshot.fingerprint, snapshot.hooks, this.options.shellFlavor ?? process.platform,
+      this.options.defaultTimeoutMs ?? 600_000, this.options.maxOutputBytes ?? 1_048_576]));
+  }
+  private async trusted(cwd: string, snapshot: Snapshot): Promise<boolean> {
+    try { const grant = await this.trust.get(cwd); return !!grant && grant.fingerprint === snapshot.fingerprint && grant.policy === this.policy(snapshot); }
+    catch { return false; } // Corrupt/unreadable storage never grants executable-code access.
+  }
+  async remember(request: PermissionRequest, signal: AbortSignal): Promise<void> {
+    const state = this.state(request.sessionId), epoch = state.epoch;
+    const current = async () => {
+      if (signal.aborted || state.closed || this.lifetime.signal.aborted || state.epoch !== epoch || state.cwd !== request.cwd) return false;
+      const snapshot = await this.refresh(request.sessionId);
+      return !signal.aborted && !state.closed && !this.lifetime.signal.aborted && state.epoch === epoch && snapshot.fingerprint === request.fingerprint;
+    };
+    if (!await current()) throw new Error('Hooks changed. Review again.');
+    await this.trust.remember(state.cwd, request.fingerprint, this.policy(state.snapshot!), current);
+    state.ignorePermanent = false;
+  }
+  async permissionStatus(id: string) {
+    const state = this.sessions.get(id);
+    if (!state || state.closed) return { session: false, permanent: false };
+    const snapshot = await this.refresh(id);
+    return { cwd: state.cwd, session: state.approved === state.epoch, permanent: await this.trusted(state.cwd, snapshot) };
+  }
+  async forget(id: string): Promise<void> {
+    const state = this.state(id), cwd = await this.trust.scope(state.cwd);
+    // Withdraw requests and active work before touching disk; a stale pending answer cannot re-grant.
+    for (const other of this.sessions.values()) {
+      if (!other.closed && await this.trust.scope(other.cwd).catch(() => '') === cwd) this.invalidate(other, 'permanent hook permission revoked');
+    }
+    await this.trust.forget(state.cwd);
+  }
   stopWork(id: string): void {
     const state = this.sessions.get(id); if (!state || state.closed) return;
-    const approved = state.approved === state.epoch;
+    const approved = state.approved === state.epoch, permanent = state.permanent;
     this.invalidate(state, 'session work stopped');
-    if (approved) state.approved = state.epoch; // Cleanup may reuse a reviewed, unchanged configuration.
+    if (approved) { state.approved = state.epoch; state.permanent = !!permanent; } // Cleanup may reuse a reviewed, unchanged configuration.
   }
   retainContexts(id: string, outcome: Outcome): void {
     const state = this.state(id);
