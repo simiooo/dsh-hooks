@@ -33,25 +33,30 @@ export interface PermissionRequest {
     }[];
 }
 export type Authorize = (request: PermissionRequest, signal: AbortSignal) => Promise<boolean>;
-/** Protocol engine; every process uses the Harness shell, including remote/sandbox executors. */
+/** Protocol engine; processes use the Harness shell and immutable session/revision lifetimes. */
 export declare class HooksEngine {
     private shell;
     private authorize;
-    readonly options: Options;
     private log;
     private sessions;
     private lifetime;
     private interval;
+    private disposal;
+    readonly options: Readonly<Options>;
     constructor(shell: Shell, authorize: Authorize, options?: Options, log?: (message: string) => void);
     start(): void;
     attach(id: string, cwd: string): void;
     private state;
+    private invalidate;
     refresh(id: string): Promise<Snapshot>;
+    private valid;
     private permitted;
     revoke(id: string): void;
     stopWork(id: string): void;
+    retainContexts(id: string, outcome: Outcome): void;
     takeContexts(id: string): string[];
     run(id: string, event: EventName, payload: Record<string, unknown>, subjects: readonly string[], signal: AbortSignal, approvedOnly?: boolean): Promise<Outcome>;
+    private runPoint;
     private command;
     private track;
     private enqueue;

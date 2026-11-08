@@ -14,6 +14,7 @@ export function apply(ctx, options = {}) {
     const bySession = new Map();
     const detached = new Set();
     const closing = new Map();
+    const ended = new WeakSet();
     const lifetime = new AbortController();
     const track = (promise) => {
         detached.add(promise);
@@ -41,7 +42,7 @@ export function apply(ctx, options = {}) {
     const stateOf = (agent) => {
         let state = states.get(agent);
         if (!state) {
-            state = { source: 'resume', started: false, turn: 0, continued: 0, last: null, model: agent.options?.model ?? '' };
+            state = { source: 'resume', started: false, turn: 0, continued: 0, last: null, model: agent.options?.model ?? '', continuationIds: new Set() };
             states.set(agent, state);
             bySession.set(agent.session, agent);
             for (const event of agent.session.snapshotEvents())
@@ -54,11 +55,26 @@ export function apply(ctx, options = {}) {
             state.turn = event.data.turn;
             state.continued = 0;
             state.last = null;
+            state.continuationIds.clear();
+            delete state.interruptedTurn;
         }
         if (event.type === 'assistant/message')
             state.last = text(event.data.message?.content ?? event.data.content ?? []);
         if (event.type === 'request/header')
             state.model = event.data.header?.config?.model ?? state.model;
+        if (event.type === 'working-directory/change')
+            state.cwd = event.data.cwd;
+        if (event.type === 'agent/inbox/spliced')
+            for (const message of event.data.inserted ?? [])
+                rememberContinuation(state, message);
+        if (event.type === 'user/message')
+            rememberContinuation(state, event.data);
+    }
+    function rememberContinuation(state, message) {
+        if (message.source?.kind === 'dsh-hooks' && message.source.event === 'Stop' && !state.continuationIds.has(message.id)) {
+            state.continuationIds.add(message.id);
+            state.continued++;
+        }
     }
     const payload = (agent, event, cwd, extra = {}) => {
         const state = stateOf(agent);
@@ -67,8 +83,15 @@ export function apply(ctx, options = {}) {
             ...(['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt'].includes(event) ? { turn_id: String(state.turn) } : {}), ...extra };
     };
     async function run(agent, event, signal, extra = {}, subjects = [], approvedOnly = false) {
+        const closed = () => ({ block: true, halt: false, context: [], deferred: true, reason: 'Hooks session is closing.' });
+        if (event !== 'SessionEnd' && (ended.has(agent) || lifetime.signal.aborted))
+            return closed();
         const state = stateOf(agent);
+        if (state.closing && event !== 'SessionEnd')
+            return closed();
         const cwd = event === 'SessionEnd' && state.cwd ? state.cwd : await ctx.workingDirectory.ensure(agent, signal);
+        if (state.closing && event !== 'SessionEnd')
+            return closed();
         state.cwd = cwd;
         engine.attach(agent.id, cwd);
         return engine.run(agent.id, event, payload(agent, event, cwd, extra), subjects, signal, approvedOnly);
@@ -79,7 +102,9 @@ export function apply(ctx, options = {}) {
     };
     ctx.on('agent/created', async ({ agent, source }) => {
         await closing.get(agent.id);
-        stateOf(agent).source = source;
+        const state = stateOf(agent);
+        state.source = source;
+        state.started = false;
     });
     ctx.on('session/event', (session, event) => {
         const agent = bySession.get(session);
@@ -87,27 +112,41 @@ export function apply(ctx, options = {}) {
             return;
         const state = stateOf(agent);
         fold(state, event);
-        if (event.type === 'turn/end' && event.data.reason?.kind === 'aborted' && event.data.reason?.reason?.kind === 'user' && agent.session.header.origin !== 'subagent') {
+        if (event.type === 'turn/end' && !state.closing && state.interruptedTurn !== event.data.turn && event.data.reason?.kind === 'aborted' && event.data.reason?.reason?.kind === 'user' && agent.session.header.origin !== 'subagent') {
+            state.interruptedTurn = event.data.turn;
             track(run(agent, 'Interrupt', lifetime.signal, {}, [], true));
         }
     });
     ctx.on('agent/pre-step', async ({ agent, messages, turn, signal }, next) => {
+        if (ended.has(agent) || lifetime.signal.aborted)
+            return { kind: 'reject' };
         const state = stateOf(agent);
         state.turn = turn;
+        if (state.closing)
+            return { kind: 'reject' };
         const injected = [];
         if (!state.started) {
             // Approval requires an open turn and a visible Session. Still gates the very first model request.
-            const outcome = agent.session.header.origin === 'subagent'
-                ? (engine.attach(agent.id, await ctx.workingDirectory.ensure(agent, signal)), { block: false, halt: false, context: [] })
-                : await run(agent, 'SessionStart', signal, { source: state.source }, [state.source]);
+            let outcome;
+            if (agent.session.header.origin === 'subagent') {
+                const cwd = await ctx.workingDirectory.ensure(agent, signal);
+                if (state.closing || ended.has(agent) || lifetime.signal.aborted || signal.aborted)
+                    return { kind: 'reject' };
+                state.cwd = cwd;
+                engine.attach(agent.id, cwd);
+                outcome = { block: false, halt: false, context: [] };
+            }
+            else
+                outcome = await run(agent, 'SessionStart', signal, { source: state.source }, [state.source]);
+            if (!outcome.deferred) {
+                state.started = true;
+                engine.retainContexts(agent.id, outcome);
+            }
             if (outcome.block || outcome.halt) {
                 ctx.logger.warn(outcome.reason ?? 'SessionStart hook stopped this input');
                 return { kind: 'reject' };
             }
-            state.started = true;
-            injected.push(...outcome.context);
         }
-        injected.push(...engine.takeContexts(agent.id));
         const prompts = messages.filter(m => m.source.kind === 'user' || (m.source.kind === 'dsh-hooks' && m.source.event === 'Stop'));
         if (prompts.length) {
             const outcome = await run(agent, 'UserPromptSubmit', signal, { prompt: prompts.map(m => text(m.content)).join('\n') });
@@ -118,6 +157,9 @@ export function apply(ctx, options = {}) {
             injected.push(...outcome.context);
         }
         const downstream = await next();
+        if (downstream.kind !== 'enter' || signal.aborted || state.closing || lifetime.signal.aborted)
+            return downstream.kind === 'enter' ? { kind: 'reject' } : downstream;
+        injected.unshift(...engine.takeContexts(agent.id));
         return downstream.kind === 'enter' && injected.length ? { ...downstream, messages: [...downstream.messages, contextMessage(injected, 'context')] } : downstream;
     });
     const toolData = (exec) => {
@@ -133,9 +175,10 @@ export function apply(ctx, options = {}) {
             return next();
         const { extra, subjects } = toolData(exec);
         const out = await run(exec.agent, 'PreToolUse', exec.signal, extra, subjects);
-        if (out.block || out.halt || out.updatedInput)
-            return { kind: 'deny', reason: out.updatedInput
-                    ? `This Harness API cannot apply updatedInput. The original call was blocked; retry using: ${JSON.stringify(out.updatedInput).slice(0, 10_000)}` : out.reason ?? 'Blocked by PreToolUse hook' };
+        if (out.block || out.halt)
+            return { kind: 'deny', reason: out.reason ?? 'Blocked by PreToolUse hook' };
+        if (out.updatedInput)
+            return { kind: 'deny', reason: `This Harness API cannot apply updatedInput. The original call was blocked; retry using: ${JSON.stringify(out.updatedInput).slice(0, 10_000)}` };
         if (out.context.length)
             exec.agent.inject(contextMessage(out.context, 'PreToolUse'));
         return next(); // An allow never bypasses downstream safety/approval policies.
@@ -144,13 +187,17 @@ export function apply(ctx, options = {}) {
         if (!exec.agent)
             return next();
         const { extra, subjects } = toolData(exec);
-        const out = await run(exec.agent, 'PostToolUse', exec.signal, { ...extra, tool_response: result.isError ? { error: result.error, content: result.content } : result.value ?? result.content }, subjects);
-        halt(exec.agent, out);
+        const out = await run(exec.agent, 'PostToolUse', exec.signal, { ...extra, tool_response: result.isError ? { error: result.error, content: result.content } : result.value !== undefined ? result.value : result.content }, subjects);
         const contexts = out.context.length ? [contextMessage(out.context, 'PostToolUse')] : [];
         if (out.block)
             return { kind: 'block', feedback: [{ type: 'text', text: out.reason ?? 'Blocked by PostToolUse hook' }], ...(contexts.length ? { additionalContexts: contexts } : {}) };
         const downstream = await next();
-        return contexts.length ? { ...downstream, additionalContexts: [...contexts, ...(downstream.additionalContexts ?? [])] } : downstream;
+        let accepted = downstream;
+        if (out.replace && downstream.kind !== 'block') {
+            const { value: _value, ...metadata } = downstream;
+            accepted = { ...metadata, content: [{ type: 'text', text: out.reason ?? 'Original tool output replaced by PostToolUse hook.' }] };
+        }
+        return contexts.length ? { ...accepted, additionalContexts: [...contexts, ...(accepted.additionalContexts ?? [])] } : accepted;
     });
     ctx.on('agent/turn-stopping', async ({ agent, turn, signal }) => {
         if (agent.session.header.origin === 'subagent')
@@ -158,24 +205,31 @@ export function apply(ctx, options = {}) {
         const state = stateOf(agent);
         state.turn = turn;
         const out = await run(agent, 'Stop', signal, { stop_hook_active: state.continued > 0, last_assistant_message: state.last });
+        if (out.deferred)
+            return;
         if (out.halt) {
             halt(agent, out);
             return;
         }
         if (out.block) {
-            if (state.continued >= (options.maxStopContinuations ?? 10)) {
+            if (state.continued >= (engine.options.maxStopContinuations ?? 10)) {
                 ctx.logger.warn('Stop hook continuation limit reached');
                 return;
             }
-            state.continued++;
-            agent.steer(contextMessage([out.reason ?? 'Continue: blocked by Stop hook', ...out.context], 'Stop'));
+            const message = contextMessage([out.reason ?? 'Continue: blocked by Stop hook', ...out.context], 'Stop');
+            rememberContinuation(state, message);
+            agent.steer(message);
         }
     });
     const close = (agent) => {
         const current = closing.get(agent.id);
         if (current)
             return current;
-        const work = (async () => {
+        ended.add(agent);
+        const state = states.get(agent);
+        if (state)
+            state.closing = true;
+        const work = Promise.resolve().then(async () => {
             engine.stopWork(agent.id);
             try {
                 if (states.get(agent)?.started && agent.session.header.origin !== 'subagent')
@@ -186,7 +240,7 @@ export function apply(ctx, options = {}) {
                 states.delete(agent);
                 bySession.delete(agent.session);
             }
-        })();
+        });
         closing.set(agent.id, work);
         const clear = () => { closing.delete(agent.id); };
         void work.then(clear, clear);

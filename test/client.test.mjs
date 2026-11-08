@@ -8,6 +8,7 @@ import React, { act } from 'react';
 let plugin, copy, document, dom, createRoot;
 const registrations = new Map();
 let requests = [], answers = [], revoked = [];
+let listOverride, answerOverride, revokeOverride;
 before(async () => {
   dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost' });
   globalThis.window = dom.window; globalThis.document = dom.window.document; globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -31,9 +32,9 @@ before(async () => {
         return () => {};
       },
       dshHooksPermissions: {
-        async list({ sessionId }) { return { ok: true, value: { requests: requests.filter(r => r.sessionId === sessionId) } }; },
-        async answer(request) { answers.push(request); requests = []; return { ok: true, value: { accepted: true } }; },
-        async revoke({ sessionId }) { revoked.push(sessionId); return { ok: true, value: { revoked: true } }; },
+        async list({ sessionId }) { return listOverride ? listOverride(sessionId) : { ok: true, value: { requests: requests.filter(r => r.sessionId === sessionId) } }; },
+        async answer(request) { answers.push(request); if (answerOverride) return answerOverride(request); requests = []; return { ok: true, value: { accepted: true } }; },
+        async revoke({ sessionId }) { revoked.push(sessionId); return revokeOverride ? revokeOverride(sessionId) : { ok: true, value: { revoked: true } }; },
       },
     },
   };
@@ -45,8 +46,9 @@ async function mount(rows = [request()], sessionId = 's1', slot = 'conversation.
   requests = rows; answers = []; revoked = [];
   const container = document.createElement('div'); document.body.append(container); const root = createRoot(container);
   const Component = registrations.get(slot).component;
-  await act(async () => root.render(React.createElement('div', null, React.createElement(Component, { sessionId, t: key => copy.zh[key] }), React.createElement('textarea', { 'aria-label': 'native message', defaultValue: 'kept draft' }))));
-  return { container, async cleanup() { await act(async () => root.unmount()); container.remove(); } };
+  const render = async sid => act(async () => root.render(React.createElement('div', null, React.createElement(Component, { sessionId: sid, t: key => copy.zh[key] }), React.createElement('textarea', { 'aria-label': 'native message', defaultValue: 'kept draft' }))));
+  await render(sessionId);
+  return { container, render, async cleanup() { await act(async () => root.unmount()); container.remove(); listOverride = answerOverride = revokeOverride = undefined; } };
 }
 test('registers additive public slots without replacing the native composer', () => {
   assert(registrations.has('conversation.input.dock')); assert(registrations.has('conversation.input.right'));
@@ -101,5 +103,54 @@ test('the toolbar icon revokes only the selected Session', async () => {
   try {
     const button = view.container.querySelector('button'); assert.equal(button.getAttribute('aria-label'), '撤销 Hooks 授权');
     await act(async () => button.click()); assert.deepEqual(revoked, ['s2']);
+  } finally { await view.cleanup(); }
+});
+
+test('switching Session removes old controls immediately and ignores a late list response', async () => {
+  const view = await mount(); let finish;
+  try {
+    listOverride = () => new Promise(r => finish = r);
+    await view.render('s2'); assert(!view.container.querySelector('section'));
+    const previous = finish; await view.render('s3'); const latest = finish;
+    await act(async () => previous({ ok: true, value: { requests: [request({ sessionId: 's2' })] } }));
+    assert(!view.container.querySelector('section')); assert.equal(answers.length, 0);
+    await act(async () => latest({ ok: true, value: { requests: [request({ sessionId: 's3' })] } }));
+    await act(async () => view.container.querySelector('button.dsh-hooks-allow').click()); assert.equal(answers[0].sessionId, 's3');
+    assert.equal(view.container.querySelector('textarea').value, 'kept draft');
+  } finally { await view.cleanup(); }
+});
+
+test('withdrawn decisions disappear and a stale polling snapshot cannot resurrect answered controls', async () => {
+  const view = await mount();
+  try {
+    answerOverride = async () => ({ ok: true, value: { accepted: false } });
+    await act(async () => [...view.container.querySelectorAll('button')].find(b => b.textContent === '本会话允许').click());
+    assert(!view.container.querySelector('section'));
+    await act(async () => new Promise(r => setTimeout(r, 550)));
+    assert(!view.container.querySelector('section')); assert.equal(answers.length, 1);
+  } finally { await view.cleanup(); }
+});
+
+test('network failure permits explicit retry; IME and repeated Escape never submit a decision', async () => {
+  const view = await mount();
+  try {
+    await act(async () => {
+      for (const extra of [{ isComposing: true }, { repeat: true }, { ctrlKey: true }]) view.container.querySelector('section').dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, ...extra }));
+    }); assert.equal(answers.length, 0);
+    answerOverride = async () => { throw new Error('offline'); };
+    await act(async () => [...view.container.querySelectorAll('button')].find(b => b.textContent === '本会话允许').click());
+    assert(view.container.querySelector('[role=alert]')); assert.equal(view.container.querySelector('button.dsh-hooks-allow').disabled, false);
+    answerOverride = undefined;
+    await act(async () => view.container.querySelector('button.dsh-hooks-allow').click()); assert.equal(answers.length, 2); assert(!view.container.querySelector('section'));
+  } finally { await view.cleanup(); }
+});
+
+test('revoke is single-shot and a new Session never inherits an old pending button', async () => {
+  const view = await mount([], 's1', 'conversation.input.right'); let finish;
+  try {
+    revokeOverride = () => new Promise(r => finish = r);
+    await act(async () => { view.container.querySelector('button').click(); view.container.querySelector('button').click(); }); assert.deepEqual(revoked, ['s1']);
+    await view.render('s2'); assert.equal(view.container.querySelector('button').disabled, false);
+    await act(async () => finish({ ok: true, value: { revoked: true } })); assert.equal(view.container.querySelector('button').disabled, false);
   } finally { await view.cleanup(); }
 });

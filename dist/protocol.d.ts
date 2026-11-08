@@ -19,6 +19,10 @@ export interface Hook {
 export interface Outcome {
     block: boolean;
     halt: boolean;
+    replace?: boolean;
+    /** No handler result was admitted (approval/configuration/revision/cancellation). */
+    deferred?: boolean;
+    revision?: number;
     context: string[];
     reason?: string;
     updatedInput?: Record<string, unknown>;

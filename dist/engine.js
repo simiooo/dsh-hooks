@@ -4,51 +4,73 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { loadSnapshot, sha } from './config.js';
 import { decode, emptyOutcome, matches, merge } from './protocol.js';
-/** Protocol engine; every process uses the Harness shell, including remote/sandbox executors. */
+/** Join cancellation independently of whether a provider observes its signal. */
+function abortable(promise, signal) {
+    return new Promise((resolve, reject) => {
+        const abort = () => { signal.removeEventListener('abort', abort); reject(signal.reason ?? new Error('cancelled')); };
+        if (signal.aborted) {
+            void promise.catch(() => { });
+            abort();
+            return;
+        }
+        signal.addEventListener('abort', abort, { once: true });
+        void promise.then(value => { signal.removeEventListener('abort', abort); resolve(value); }, error => { signal.removeEventListener('abort', abort); reject(error); });
+    });
+}
+const unavailable = (event, reason) => ({ ...emptyOutcome(), deferred: true, block: true, halt: event === 'SessionStart', reason });
+/** Protocol engine; processes use the Harness shell and immutable session/revision lifetimes. */
 export class HooksEngine {
     shell;
     authorize;
-    options;
     log;
     sessions = new Map();
     lifetime = new AbortController();
     interval;
+    disposal;
+    options;
     constructor(shell, authorize, options = {}, log = () => { }) {
         this.shell = shell;
         this.authorize = authorize;
-        this.options = options;
         this.log = log;
-        for (const [key, value] of Object.entries(options)) {
+        const copy = structuredClone(options);
+        for (const [key, value] of Object.entries(copy)) {
             if (['pollIntervalMs', 'defaultTimeoutMs', 'permissionTimeoutMs', 'maxStopContinuations', 'maxOutputBytes'].includes(key)
                 && (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647))
                 throw new TypeError(`${key} must be a positive timer-safe integer`);
+            if (['configPaths', 'pluginRoots', 'watchPaths'].includes(key)) {
+                if (!Array.isArray(value) || value.some(path => typeof path !== 'string' || !path.trim()))
+                    throw new TypeError(`${key} must contain nonempty paths`);
+                Object.freeze(value);
+            }
         }
-        if (options.shellFlavor !== undefined && !['auto', 'posix', 'powershell'].includes(options.shellFlavor))
+        if (copy.shellFlavor !== undefined && !['auto', 'posix', 'powershell'].includes(copy.shellFlavor))
             throw new TypeError('invalid shellFlavor');
+        this.options = Object.freeze(copy);
     }
     start() {
+        if (this.lifetime.signal.aborted)
+            throw new Error('hooks engine disposed');
         if (this.interval)
             return;
         this.interval = setInterval(() => {
-            for (const [id] of this.sessions)
-                void this.refresh(id).catch(() => { });
+            for (const [id, state] of this.sessions)
+                if (!state.closed)
+                    void this.refresh(id).catch(() => { });
         }, this.options.pollIntervalMs ?? 1000);
         this.interval.unref();
     }
     attach(id, cwd) {
+        if (this.lifetime.signal.aborted)
+            throw new Error('hooks engine disposed');
         const old = this.sessions.get(id);
-        if (old) {
+        if (old && !old.closed) {
             if (old.cwd !== cwd) {
                 old.cwd = cwd;
-                old.approved = undefined;
-                old.revision.abort();
-                old.revision = new AbortController();
+                this.invalidate(old, 'session directory changed');
             }
             return;
         }
-        if (this.lifetime.signal.aborted)
-            throw new Error('hooks engine disposed');
-        this.sessions.set(id, { cwd, revision: new AbortController(), active: new Set(), queued: [], background: 0, contexts: [] });
+        this.sessions.set(id, { cwd, revision: new AbortController(), epoch: 0, life: new AbortController(), closed: false, active: new Set(), queued: [], background: 0, contexts: [] });
     }
     state(id) {
         const state = this.sessions.get(id);
@@ -56,36 +78,51 @@ export class HooksEngine {
             throw new Error(`hooks session not attached: ${id}`);
         return state;
     }
+    invalidate(state, reason) {
+        state.epoch++;
+        state.approved = undefined;
+        state.contexts.length = 0;
+        state.queued.length = 0;
+        state.revision.abort(new Error(reason));
+        state.pending?.controller.abort(new Error(reason));
+        state.revision = new AbortController();
+    }
     async refresh(id) {
         const state = this.state(id);
+        if (state.closed)
+            throw new Error('hooks session ended');
         if (state.refresh)
             return state.refresh;
         const work = (async () => {
-            try {
-                const snapshot = await loadSnapshot(state.cwd, this.options);
-                const changed = state.snapshot?.fingerprint !== snapshot.fingerprint || state.error !== undefined;
-                if (changed) {
-                    state.revision.abort(new Error('hooks configuration or script changed'));
-                    state.revision = new AbortController();
-                    state.approved = undefined;
-                    state.contexts.length = 0;
-                    state.queued.length = 0;
-                    state.snapshot = snapshot;
-                    this.log(`Hooks reloaded: ${snapshot.hooks.length} handlers (${snapshot.fingerprint.slice(0, 12)})`);
-                    snapshot.diagnostics.forEach(this.log);
+            for (;;) {
+                const cwd = state.cwd;
+                try {
+                    const snapshot = await loadSnapshot(cwd, this.options);
+                    if (state.closed)
+                        throw new Error('hooks session ended');
+                    if (cwd !== state.cwd)
+                        continue; // A read started in the old directory cannot publish its snapshot.
+                    if (state.snapshot?.fingerprint !== snapshot.fingerprint || state.error !== undefined) {
+                        this.invalidate(state, 'hooks configuration or script changed');
+                        state.snapshot = snapshot;
+                        this.log(`Hooks reloaded: ${snapshot.hooks.length} handlers (${snapshot.fingerprint.slice(0, 12)})`);
+                        snapshot.diagnostics.forEach(this.log);
+                    }
+                    delete state.error;
+                    return state.snapshot;
                 }
-                delete state.error;
-                return snapshot;
-            }
-            catch (error) {
-                const message = error instanceof Error ? error : new Error(String(error));
-                if (state.error?.message !== message.message)
-                    this.log(`Hooks configuration rejected: ${message.message}`);
-                state.error = message;
-                state.approved = undefined;
-                state.contexts.length = 0;
-                state.revision.abort(message);
-                throw message;
+                catch (error) {
+                    if (state.closed)
+                        throw error;
+                    if (cwd !== state.cwd)
+                        continue;
+                    const message = error instanceof Error ? error : new Error(String(error));
+                    if (state.error?.message !== message.message)
+                        this.log(`Hooks configuration rejected: ${message.message}`);
+                    state.error = message;
+                    this.invalidate(state, message.message);
+                    throw message;
+                }
             }
         })();
         state.refresh = work;
@@ -93,105 +130,146 @@ export class HooksEngine {
             return await work;
         }
         finally {
-            delete state.refresh;
+            if (state.refresh === work)
+                delete state.refresh;
         }
     }
-    async permitted(id, snapshot, signal, approvedOnly) {
-        const state = this.state(id);
-        if (state.approved === snapshot.fingerprint)
-            return true;
-        if (approvedOnly || signal.aborted)
+    valid(state, revision) {
+        return !state.closed && !this.lifetime.signal.aborted && state.epoch === revision.epoch && state.cwd === revision.cwd && !revision.signal.aborted;
+    }
+    async permitted(id, state, revision, signal, approvedOnly) {
+        if (!this.valid(state, revision) || signal.aborted)
             return false;
-        // One human review for the complete immutable configuration, even when tool calls overlap.
-        if (state.pendingApproval) {
-            await state.pendingApproval;
-            return state.approved === snapshot.fingerprint && !signal.aborted;
-        }
-        const request = {
-            schema: 'dsh-hooks/approval-v1', sessionId: id, cwd: state.cwd, fingerprint: snapshot.fingerprint, scope: 'session',
-            hooks: snapshot.hooks.map(({ event, command, source, statusMessage }) => ({ event, command, source, ...(statusMessage ? { statusMessage } : {}) })),
-        };
-        const approvalSignal = AbortSignal.any([signal, AbortSignal.timeout(this.options.permissionTimeoutMs ?? 120_000)]);
-        const pending = (async () => {
-            try {
-                const allowed = await this.authorize(request, approvalSignal);
-                if (!allowed || approvalSignal.aborted)
+        if (state.approved === revision.epoch)
+            return true;
+        if (approvedOnly)
+            return false;
+        let pending = state.pending;
+        if (!pending || pending.revision !== revision.epoch || pending.controller.signal.aborted) {
+            const request = {
+                schema: 'dsh-hooks/approval-v1', sessionId: id, cwd: revision.cwd, fingerprint: revision.snapshot.fingerprint, scope: 'session',
+                hooks: revision.snapshot.hooks.map(({ event, command, source, statusMessage }) => ({ event, command, source, ...(statusMessage ? { statusMessage } : {}) })),
+            };
+            const controller = new AbortController();
+            const approvalSignal = AbortSignal.any([controller.signal, state.life.signal, revision.signal, this.lifetime.signal]);
+            const entry = { revision: revision.epoch, controller, promise: Promise.resolve(false), waiters: 0, settled: false };
+            state.pending = entry;
+            const timeout = setTimeout(() => controller.abort(new Error('hook permission timed out')), this.options.permissionTimeoutMs ?? 120_000);
+            entry.promise = (async () => {
+                try {
+                    const allowed = await abortable(Promise.resolve().then(() => { approvalSignal.throwIfAborted(); return this.authorize(request, approvalSignal); }), approvalSignal);
+                    if (!allowed || approvalSignal.aborted || !this.valid(state, revision))
+                        return false;
+                    await abortable(this.refresh(id), approvalSignal);
+                    if (approvalSignal.aborted || !this.valid(state, revision))
+                        return false;
+                    state.approved = revision.epoch;
+                    return true;
+                }
+                catch (error) {
+                    if (!approvalSignal.aborted)
+                        this.log(`Hook permission unavailable: ${String(error)}`);
                     return false;
-                const current = await this.refresh(id);
-                if (current.fingerprint !== snapshot.fingerprint || signal.aborted)
-                    return false;
-                state.approved = snapshot.fingerprint;
-                return true;
-            }
-            catch (error) {
-                this.log(`Hook permission unavailable: ${String(error)}`);
-                return false;
-            }
-        })();
-        state.pendingApproval = pending;
-        try {
-            return await pending;
+                }
+                finally {
+                    clearTimeout(timeout);
+                    entry.settled = true;
+                    if (state.pending === entry)
+                        delete state.pending;
+                }
+            })();
+            pending = entry;
         }
-        finally {
-            delete state.pendingApproval;
-        }
-    }
-    revoke(id) {
-        const state = this.sessions.get(id);
-        if (!state)
-            return;
-        state.approved = undefined;
-        this.stopWork(id);
-    }
-    stopWork(id) {
-        const state = this.sessions.get(id);
-        if (!state)
-            return;
-        state.revision.abort(new Error('hook permission revoked'));
-        state.revision = new AbortController();
-        state.queued.length = 0;
-    }
-    takeContexts(id) { return this.state(id).contexts.splice(0); }
-    async run(id, event, payload, subjects, signal, approvedOnly = false) {
-        const state = this.state(id);
-        let snapshot;
+        pending.waiters++;
         try {
-            snapshot = await this.refresh(id);
+            return await abortable(pending.promise, signal) && this.valid(state, revision) && !signal.aborted;
         }
         catch {
-            return { ...emptyOutcome(), block: true, halt: true, reason: 'Hooks configuration is invalid; fix the file before continuing.' };
+            return false;
         }
+        finally {
+            pending.waiters--;
+            if (!pending.waiters && !pending.settled)
+                pending.controller.abort(new Error('no active hook permission waiters'));
+        }
+    }
+    revoke(id) { const state = this.sessions.get(id); if (state && !state.closed)
+        this.invalidate(state, 'hook permission revoked'); }
+    stopWork(id) {
+        const state = this.sessions.get(id);
+        if (!state || state.closed)
+            return;
+        const approved = state.approved === state.epoch;
+        this.invalidate(state, 'session work stopped');
+        if (approved)
+            state.approved = state.epoch; // Cleanup may reuse a reviewed, unchanged configuration.
+    }
+    retainContexts(id, outcome) {
+        const state = this.state(id);
+        if (!state.closed && !outcome.deferred && outcome.revision === state.epoch)
+            state.contexts.push(...outcome.context.map(text => ({ revision: state.epoch, text })));
+    }
+    takeContexts(id) {
+        const state = this.state(id);
+        return state.contexts.splice(0).filter(item => !state.closed && item.revision === state.epoch).map(item => item.text);
+    }
+    run(id, event, payload, subjects, signal, approvedOnly = false) {
+        const state = this.state(id);
+        if (state.closed)
+            return Promise.resolve(unavailable(event, 'Hooks session has ended.'));
+        return this.track(state, this.runPoint(id, state, event, payload, subjects, signal, approvedOnly));
+    }
+    async runPoint(id, state, event, payload, subjects, signal, approvedOnly) {
+        const cwd = state.cwd;
+        let snapshot;
+        const operationSignal = AbortSignal.any([signal, state.life.signal, this.lifetime.signal]);
+        try {
+            snapshot = await abortable(this.refresh(id), operationSignal);
+        }
+        catch {
+            return unavailable(event, 'Hooks configuration is unavailable; fix the file before continuing.');
+        }
+        const revision = { cwd, snapshot, epoch: state.epoch, signal: state.revision.signal };
+        const ownerSignal = AbortSignal.any([signal, revision.signal, state.life.signal, this.lifetime.signal]);
+        const stale = () => unavailable(event, 'Hooks changed or were cancelled; retry to review the current version.');
+        if (!this.valid(state, revision) || ownerSignal.aborted)
+            return stale();
         const hooks = snapshot.hooks.filter(hook => hook.event === event && matches(hook, subjects));
         if (!hooks.length)
-            return emptyOutcome();
-        const ownerSignal = AbortSignal.any([signal, this.lifetime.signal, state.revision.signal]);
-        if (!await this.permitted(id, snapshot, ownerSignal, approvedOnly)) {
-            this.log(`Hooks ${event}: current version has no human approval`);
-            return { ...emptyOutcome(), block: true, halt: event === 'SessionStart', reason: 'Hook execution was not approved.' };
+            return { ...emptyOutcome(), revision: revision.epoch };
+        if (!await this.permitted(id, state, revision, ownerSignal, approvedOnly))
+            return unavailable(event, 'Hook execution was not approved.');
+        try {
+            await abortable(this.refresh(id), ownerSignal);
         }
-        // Fresh read after human review closes the known edit-during-approval window.
-        const stale = () => ({ ...emptyOutcome(), block: true, halt: event === 'SessionStart', reason: 'Hooks changed during execution; retry to review the current version.' });
-        if ((await this.refresh(id)).fingerprint !== snapshot.fingerprint || ownerSignal.aborted)
+        catch {
+            return unavailable(event, 'Hooks configuration became unavailable during review.');
+        }
+        if (!this.valid(state, revision) || ownerSignal.aborted)
             return stale();
         const execute = async (hook, background) => {
+            const executionSignal = background ? AbortSignal.any([revision.signal, state.life.signal, this.lifetime.signal]) : ownerSignal;
             try {
-                ownerSignal.throwIfAborted();
+                executionSignal.throwIfAborted();
+                if (!this.valid(state, revision))
+                    return stale();
                 if (hook.statusMessage)
                     this.log(hook.statusMessage);
                 if (hook.env.PLUGIN_DATA)
                     await mkdir(hook.env.PLUGIN_DATA, { recursive: true, mode: 0o700 });
+                executionSignal.throwIfAborted();
                 let timeoutMs = (hook.timeout ?? (this.options.defaultTimeoutMs ?? 600_000) / 1000) * 1000;
                 if (event === 'SessionEnd' || event === 'Interrupt')
                     timeoutMs = Math.min(3000, Math.max(1000, (hook.timeout ?? 1) * 1000));
-                const execution = await this.shell.execute(this.shell.resolve({
-                    command: this.command(hook.command), workdir: state.cwd, stdin: JSON.stringify(payload), env: hook.env,
-                    timeoutMs, stdoutMaxBytes: this.options.maxOutputBytes ?? 1_048_576,
-                    signal: background ? AbortSignal.any([this.lifetime.signal, state.revision.signal]) : ownerSignal,
-                }));
+                timeoutMs = Math.max(1, Math.ceil(timeoutMs));
+                const spec = this.shell.resolve({ command: this.command(hook.command), workdir: revision.cwd, stdin: JSON.stringify(payload), env: hook.env,
+                    timeoutMs, stdoutMaxBytes: this.options.maxOutputBytes ?? 1_048_576, signal: executionSignal });
+                executionSignal.throwIfAborted();
+                const execution = await this.shell.execute(spec);
                 const result = await execution.result();
                 if (result.timedOut || result.aborted || result.stdout.truncated)
                     throw new Error(`hook incomplete: timedOut=${!!result.timedOut}, aborted=${!!result.aborted}, truncated=${!!result.stdout.truncated}`);
-                if (ownerSignal.aborted || state.snapshot?.fingerprint !== snapshot.fingerprint)
+                if (!this.valid(state, revision) || executionSignal.aborted)
                     return background ? emptyOutcome() : stale();
                 const out = decode(event, result.exitCode, result.stdout.text, result.stderr.text);
                 try {
@@ -199,35 +277,39 @@ export class HooksEngine {
                     if (typeof raw === 'object' && raw && 'systemMessage' in raw && typeof raw.systemMessage === 'string')
                         this.log(raw.systemMessage);
                 }
-                catch { /* Plain text is valid on context-producing events. */ }
+                catch { /* Plain stdout is accepted only by the event-specific decoder. */ }
                 out.context = await Promise.all(out.context.map(text => this.limitContext(id, text, hook.additionalContextLimit)));
+                // Spilling is asynchronous too: a revoke during the write must not publish old output.
+                if (!this.valid(state, revision) || executionSignal.aborted)
+                    return background ? emptyOutcome() : stale();
                 if (background) {
-                    state.contexts.push(...out.context);
+                    state.contexts.push(...out.context.map(text => ({ revision: revision.epoch, text })));
                     return emptyOutcome();
                 }
                 return out;
             }
             catch (error) {
                 this.log(`${event} hook failed (${hook.source}): ${String(error)}`);
-                if (!background && (state.snapshot?.fingerprint !== snapshot.fingerprint || (ownerSignal.aborted && !signal.aborted)))
+                if (!background && (!this.valid(state, revision) || ownerSignal.aborted))
                     return stale();
-                return emptyOutcome(); // Codex process/parse failures are nonblocking.
+                return emptyOutcome(); // Process, timeout and parse failures follow Codex's nonblocking policy.
             }
         };
-        // Every matching handler starts independently. Return order is configuration order.
-        return merge(await Promise.all(hooks.map(hook => {
+        const out = merge(await Promise.all(hooks.map(hook => {
             if (!hook.async)
-                return this.track(state, execute(hook, false));
-            this.enqueue(state, () => this.track(state, execute(hook, true)));
+                return execute(hook, false);
+            this.enqueue(state, revision, () => execute(hook, true));
             return Promise.resolve(emptyOutcome());
         })));
+        if (!this.valid(state, revision) || ownerSignal.aborted)
+            return stale();
+        return { ...out, revision: revision.epoch };
     }
     command(command) {
         const powershell = this.options.shellFlavor === 'powershell' || ((this.options.shellFlavor ?? 'auto') === 'auto' && process.platform === 'win32');
         if (!powershell)
             return command;
         const expanded = command.replace(/\$\{(PLUGIN_ROOT|PLUGIN_DATA|CLAUDE_PLUGIN_ROOT|CLAUDE_PLUGIN_DATA)\}/g, (_match, key) => `$env:${key}`);
-        // PowerShell -Command normally collapses a native exit 2 to 1. Preserve the hook protocol.
         return `$global:LASTEXITCODE = 0\n& {\n${expanded}\n}\n$dshHooksSucceeded = $?\nif (-not $dshHooksSucceeded -and $LASTEXITCODE -eq 0) { exit 1 }\nexit $LASTEXITCODE`;
     }
     track(state, promise) {
@@ -235,16 +317,17 @@ export class HooksEngine {
         void promise.then(() => state.active.delete(promise), () => state.active.delete(promise));
         return promise;
     }
-    enqueue(state, task) {
+    enqueue(state, revision, task) {
         if (state.queued.length >= 256) {
             this.log('Hook background queue is full; invocation skipped');
             return;
         }
         const start = () => {
-            if (state.revision.signal.aborted || this.lifetime.signal.aborted)
+            if (!this.valid(state, revision))
                 return;
             state.background++;
-            void task().finally(() => { state.background--; state.queued.shift()?.(); });
+            const settled = () => { state.background--; state.queued.shift()?.(); };
+            void this.track(state, task()).then(settled, settled);
         };
         if (state.background < 8)
             start();
@@ -272,17 +355,30 @@ export class HooksEngine {
         const state = this.sessions.get(id);
         if (!state)
             return;
+        if (state.draining)
+            return state.draining;
+        state.closed = true;
+        state.life.abort(new Error('session ended'));
         state.revision.abort(new Error('session ended'));
+        state.pending?.controller.abort(new Error('session ended'));
         state.queued.length = 0;
-        await Promise.allSettled([...state.active, ...state.refresh ? [state.refresh] : [], ...state.pendingApproval ? [state.pendingApproval] : []]);
-        this.sessions.delete(id);
+        state.contexts.length = 0;
+        state.draining = (async () => {
+            await Promise.allSettled([...state.active, ...state.refresh ? [state.refresh] : [], ...state.pending ? [state.pending.promise] : []]);
+            if (this.sessions.get(id) === state)
+                this.sessions.delete(id);
+        })();
+        return state.draining;
     }
     async dispose() {
+        if (this.disposal)
+            return this.disposal;
         if (this.interval)
             clearInterval(this.interval);
         this.interval = undefined;
         this.lifetime.abort(new Error('hooks plugin disposed'));
-        await Promise.allSettled([...this.sessions.keys()].map(id => this.detach(id)));
+        this.disposal = Promise.allSettled([...this.sessions.keys()].map(id => this.detach(id))).then(() => { });
+        return this.disposal;
     }
 }
 //# sourceMappingURL=engine.js.map

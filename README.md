@@ -1,6 +1,6 @@
 # DSH Hooks
 
-为 DeepSeek Harness 复用 **Codex command hooks**。支持配置和脚本热重载、输入框上方的人类授权，以及会话级撤销。当前是 0.1.0，支持下表中的事件，**尚未完整覆盖 Codex hooks**。
+为 DeepSeek Harness 复用 **Codex command hooks**。支持配置和脚本热重载、输入框上方的人类授权，以及会话级撤销。当前是 0.1.1，支持下表中的事件，**尚未完整覆盖 Codex hooks**。
 
 ## 安装
 
@@ -77,16 +77,18 @@ config:
 | `SessionStart` | 在首个模型请求前执行；支持 source matcher、纯文本/JSON 上下文、`continue:false`。为展示人类授权，延迟到首个实际输入的 pre-step，创建空会话时不运行。仅主会话。 |
 | `UserPromptSubmit` | 拒绝输入、上下文、`continue:false`；忽略 matcher。不会对单纯注入的上下文重复触发。 |
 | `PreToolUse` | 完整参数、deny、legacy block、exit 2、上下文。allow 仍经过宿主后续策略。 |
-| `PostToolUse` | 保留结构化结果；block 转为工具反馈，附加上下文，`continue:false` 中止回合。 |
+| `PostToolUse` | 保留结构化结果（包括 `null`）；block 转为工具反馈；`continue:false` 替换原结果为反馈，模型继续。 |
 | `Stop` | block/exit 2 续跑；正确维护 `stop_hook_active` 和最后一条 assistant 文本；`continue:false` 优先。忽略 matcher，仅主会话。 |
 | `Interrupt` | 用户中断的主回合结束后尽快执行；只使用已审查版本，不阻止中断。 |
 | `SessionEnd` | agent 释放或插件卸载时执行清理；只使用已审查版本，强制同步。插件卸载也会触发，这是 Harness 侧的扩展。 |
+
+各事件的触发、取消、错误、并发和重载边界见 [边界矩阵](docs/hook-boundaries.md)，并由协议、引擎、宿主适配和 Client 回归测试覆盖。
 
 共享输入包含 `session_id`、`transcript_path:null`、`cwd`、`hook_event_name`、实际 model，以及适用事件的 `turn_id`。目前 `permission_mode` 为兼容占位值 `default`，不代表 Harness 当前审批模式。子 agent 的工具事件使用父 `session_id`。
 
 - `bash` / `exec_command` 映射为 `Bash`，`apply_patch` 也匹配 `Edit` / `Write`；其他工具保留原名。非 shell 参数完整传递；`exec_command.cmd` 同时映射到 `tool_input.command`。
 - 同事件匹配的命令并发启动，按配置顺序合并反馈。超时单位为秒，默认 600 秒；清理/中断默认 1 秒、最多 3 秒，仍受宿主 shell 上限约束。
-- 支持 `commandWindows`（TOML 也接受 `command_windows`）、`statusMessage`、`async`、`additionalContextLimit`。异步命令每会话最多并发 8 个，待运行上限 256；人类审查先于后台启动。异步输出在后续 pre-step 注入，不接受后台控制决策。
+- 支持 `commandWindows`（TOML 也接受 `command_windows`）、`statusMessage`、`async`、`additionalContextLimit`。异步命令每会话最多并发 8 个，待运行上限 256；人类审查先于后台启动。异步任务独立于触发它的回合取消，输出在当前或下一回合的后续 pre-step 注入，不主动开启回合，不接受后台控制决策。撤销、重载、会话结束和卸载仍会取消并丢弃旧输出。
 - `additionalContextLimit` 默认为约 2500 token，按每 token 4 字符估算；0 直通。较长输出存入本机临时目录，只注入首尾和路径。单次 stdout 默认上限 1 MiB；被截断的协议输出不会作为有效决策。
 - 命令通过 `ctx.shell` 执行，保留宿主取消、沙箱和凭据过滤。`systemMessage` / `statusMessage` 写入 Harness 日志，不另外模拟 Codex 的 hooks UI。
 - 插件命令获得 `PLUGIN_ROOT`、`PLUGIN_DATA` 和对应的 `CLAUDE_PLUGIN_*` 变量。数据目录默认 `~/.dsh/hooks-data/<root hash>`，可通过 `pluginDataRoot` 改写。
@@ -106,6 +108,8 @@ config:
 
 文件变化会取消旧版本的待审批请求和运行任务，清除该版本授权；下一次执行重新审查。每个事件执行前也复核快照。配置语法错误会阻止相关操作，不继续执行旧配置。热重载不自动重放已发生的事件；插件自身代码更新遵循 Harness 的插件加载/重启流程。
 
+审批默认等待 120 秒（`permissionTimeoutMs`）；超时、撤回及最后一个等待者取消均关闭请求，迟到的允许不生效。并发触发共享同会话、同版本审批，单个操作取消不撤销其他等待者。配置错误或权限未批准不会被解释成 Stop 的续跑决策；Interrupt / SessionEnd 跳过未审查版本，不弹出新审批。
+
 ## 开发与验证
 
 ```sh
@@ -121,7 +125,7 @@ $env:DSH_SOURCE_DIR = 'D:\path\to\deepseek-harness'
 npm run test:harness
 ```
 
-验证运行真实 Cordis、AgentLoop、shell、原生审批审计和 Typert Gateway，覆盖工具拒绝、完整参数、首轮上下文、Stop 状态、脚本热重载及重新授权、跨会话拒绝、交互权限和撤销。普通测试另覆盖 UI 操作、并发、超时、异步队列、原子保存和协议边界。
+验证运行真实 Cordis、AgentLoop、shell、原生审批审计和 Typert Gateway，覆盖工具拒绝、完整参数、首轮上下文、PostToolUse 结果替换与继续、Stop 状态、脚本热重载及重新授权、跨会话/错误版本/重复回答拒绝、交互权限和撤销。普通测试另覆盖 UI 操作、并发、超时、异步队列、原子保存和协议边界。
 
 `npm run test:visual` 可在已安装 Edge 的 Windows 上检查真实权限组件的桌面/窄屏布局与交互，截图写入 `.artifacts/`；其他平台通过 `BROWSER_PATH` 指定 Chromium 可执行文件。预览中的外围 composer 是测试夹具。
 

@@ -19,6 +19,10 @@ export interface Hook {
 export interface Outcome {
   block: boolean;
   halt: boolean;
+  replace?: boolean;
+  /** No handler result was admitted (approval/configuration/revision/cancellation). */
+  deferred?: boolean;
+  revision?: number;
   context: string[];
   reason?: string;
   updatedInput?: Record<string, unknown>;
@@ -55,9 +59,12 @@ export function decode(event: EventName, exitCode: number | null, stdout: string
   const h = object(specific) ? specific : {};
   if (raw.systemMessage !== undefined && typeof raw.systemMessage !== 'string') throw new Error('invalid systemMessage');
   if (raw.continue !== undefined && typeof raw.continue !== 'boolean') throw new Error('invalid continue');
+  if (raw.stopReason !== undefined && typeof raw.stopReason !== 'string') throw new Error('invalid stopReason');
+  if (raw.suppressOutput !== undefined && typeof raw.suppressOutput !== 'boolean') throw new Error('invalid suppressOutput');
   if (raw.decision !== undefined && raw.decision !== 'block' && raw.decision !== 'approve') throw new Error('invalid decision');
   if (raw.reason !== undefined && typeof raw.reason !== 'string') throw new Error('invalid reason');
   if (h.additionalContext !== undefined && typeof h.additionalContext !== 'string') throw new Error('invalid additionalContext');
+  if (h.permissionDecisionReason !== undefined && typeof h.permissionDecisionReason !== 'string') throw new Error('invalid permissionDecisionReason');
   if (event === 'PreToolUse') {
     if (['continue', 'stopReason', 'suppressOutput'].some(k => k in raw) || raw.decision === 'approve' || h.permissionDecision === 'ask') {
       throw new Error('unsupported Codex PreToolUse control field');
@@ -69,6 +76,11 @@ export function decode(event: EventName, exitCode: number | null, stdout: string
     }
     out.block = h.permissionDecision === 'deny' || raw.decision === 'block';
     if (typeof h.permissionDecisionReason === 'string') out.reason = h.permissionDecisionReason;
+  } else if (event === 'PostToolUse') {
+    if ('suppressOutput' in raw || 'updatedMCPToolOutput' in h || 'updatedMCPToolOutput' in raw) throw new Error('unsupported Codex PostToolUse control field');
+    out.block = raw.decision === 'block';
+    out.replace = raw.continue === false;
+    if (typeof raw.stopReason === 'string') out.reason = raw.stopReason;
   } else if (gate) {
     out.block = raw.decision === 'block';
     out.halt = raw.continue === false;
@@ -78,19 +90,21 @@ export function decode(event: EventName, exitCode: number | null, stdout: string
     if (typeof raw.stopReason === 'string') out.reason = raw.stopReason;
   }
   if (typeof raw.reason === 'string' && out.reason === undefined) out.reason = raw.reason;
-  if (typeof h.additionalContext === 'string' && !['Interrupt', 'SessionEnd'].includes(event)) out.context.push(h.additionalContext);
+  if (typeof h.additionalContext === 'string' && ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse'].includes(event)) out.context.push(h.additionalContext);
   return out;
 }
 
 /** Stable config order chooses feedback; a halt always wins over Stop continuation. */
 export function merge(outputs: Outcome[]): Outcome {
   const merged = emptyOutcome();
+  let feedbackPriority = 0;
   for (const out of outputs) {
-    if (out.halt && !merged.halt && out.reason) merged.reason = out.reason;
+    const priority = out.halt ? 3 : out.block ? 2 : out.replace ? 1 : 0;
+    if (out.reason && priority > feedbackPriority) { merged.reason = out.reason; feedbackPriority = priority; }
     merged.block ||= out.block;
     merged.halt ||= out.halt;
+    if (out.replace) merged.replace = true;
     merged.context.push(...out.context);
-    if (out.reason && (out.block || out.halt) && !merged.reason) merged.reason = out.reason;
     if (out.updatedInput) merged.updatedInput = out.updatedInput;
   }
   return merged;

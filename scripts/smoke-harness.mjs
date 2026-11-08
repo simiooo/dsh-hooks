@@ -43,7 +43,7 @@ let input=''; for await(const chunk of process.stdin) input+=chunk;
 const p=JSON.parse(input); fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify(p)+'\\n');
 if(p.hook_event_name==='SessionStart') console.log('startup context');
 if(p.hook_event_name==='PreToolUse'&&p.tool_input.text==='blocked') {console.error('deny fixture');process.exit(2);}
-if(p.hook_event_name==='PostToolUse') console.log(JSON.stringify({hookSpecificOutput:{hookEventName:'PostToolUse',additionalContext:'post context'}}));
+if(p.hook_event_name==='PostToolUse') console.log(JSON.stringify({continue:false,stopReason:'replacement feedback',hookSpecificOutput:{hookEventName:'PostToolUse',additionalContext:'post context'}}));
 if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:{decision:'block',reason:'one more pass'}));
 `);
   const command = `node "${scriptPath.replaceAll('\\', '/')}"`;
@@ -66,34 +66,40 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
       for (const request of (await invoke('list', { sessionId: 'hooks-smoke' })).requests) {
         asks.push(request);
         assert.equal((await invoke('answer', { sessionId: 'other', id: request.id, fingerprint: request.fingerprint, decision: 'allow-session' })).accepted, false);
-        await invoke('answer', { sessionId: request.sessionId, id: request.id, fingerprint: request.fingerprint, decision: 'allow-session' });
+        assert.equal((await invoke('answer', { sessionId: request.sessionId, id: request.id, fingerprint: '0'.repeat(64), decision: 'allow-session' })).accepted, false);
+        const decision = { sessionId: request.sessionId, id: request.id, fingerprint: request.fingerprint, decision: 'allow-session' };
+        assert.equal((await invoke('answer', decision)).accepted, true);
+        assert.equal((await invoke('answer', decision)).accepted, false);
       }
     } finally { answering = false; }
   }, 25);
   ctx.effect(() => () => clearInterval(answerTimer));
-  const adapter = new Adapter([{ name: 'echo', args: { text: 'blocked', nested: { count: 7 } } }, 'first', 'continued', 'after reload', 'continued again']);
+  const adapter = new Adapter([{ name: 'echo', args: { text: 'blocked', nested: { count: 7 } } }, { name: 'echo', args: { text: 'allowed' } }, 'first', 'continued', 'after reload', 'continued again']);
   ctx.llm.registerAdapter(['mock'], adapter);
-  let executions = 0;
-  ctx.tools.register(tools.defineContentToolFixture({ name: 'echo', description: 'smoke', parameters: { text: { type: 'string' }, nested: { type: 'object', properties: { count: { type: 'integer' } }, additionalProperties: false } }, async execute() { executions++; return [{ type: 'text', text: 'unexpected' }]; } }));
+  const executions = [];
+  ctx.tools.register(tools.defineContentToolFixture({ name: 'echo', description: 'smoke', parameters: { text: { type: 'string' }, nested: { type: 'object', properties: { count: { type: 'integer' } }, additionalProperties: false } }, async execute(args) { executions.push(args.text); return [{ type: 'text', text: 'ORIGINAL_TOOL_OUTPUT' }]; } }));
   const hooksFiber = ctx.plugin(Plugin, { discover: false, configPaths: [configPath], pollIntervalMs: 1000 });
   await hooksFiber;
   const agent = await ctx.agentLoop.create(session.SessionId('hooks-smoke'), { provider: 'mock', model: 'mock' }, { cwd: dir });
   const send = value => agent.followup(llm.createUserMessage({ content: [{ type: 'text', text: value }], source: { kind: 'user' } }));
   send('test hook gates'); await agent.whenIdle();
-  assert.equal(executions, 0, 'denied tool must not execute'); assert.equal(asks.length, 1);
+  assert.deepEqual(executions, ['allowed'], 'only the allowed call executes'); assert.equal(asks.length, 1);
   let rows = (await readFile(capture, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(rows.find(r => r.hook_event_name === 'PreToolUse').tool_input, { text: 'blocked', nested: { count: 7 } });
   assert.deepEqual(rows.filter(r => r.hook_event_name === 'Stop').map(r => r.stop_hook_active), [false, true]);
   assert.deepEqual(rows.filter(r => r.hook_event_name === 'Stop').map(r => r.last_assistant_message), ['first', 'continued']);
   assert.equal(rows[0].cwd, dir);
   assert(JSON.stringify(adapter.requests[0]).includes('startup context'), 'SessionStart context must reach first model request');
+  assert(JSON.stringify(adapter.requests[2]).includes('replacement feedback'), 'PostToolUse continue:false must return feedback and continue the model');
+  assert(JSON.stringify(adapter.requests[2]).includes('post context'));
+  assert(!JSON.stringify(adapter.requests[2]).includes('ORIGINAL_TOOL_OUTPUT'), 'original output must be replaced');
   await invoke('revoke', { sessionId: 'hooks-smoke' });
   // Script-only change: next turn asks again, with no plugin or agent restart.
   await writeFile(scriptPath, (await readFile(scriptPath, 'utf8')) + '\n// changed revision\n');
   send('test reload'); await agent.whenIdle(); assert.equal(asks.length, 2);
   rows = (await readFile(capture, 'utf8')).trim().split('\n').map(JSON.parse);
   assert.deepEqual(rows.filter(r => r.hook_event_name === 'Stop').map(r => r.stop_hook_active), [false, true, false, true]);
-  assert.equal(adapter.requests.length, 5);
+  assert.equal(adapter.requests.length, 6);
   assert.notEqual(asks[0].fingerprint, asks[1].fingerprint);
   const decisions = agent.session.snapshotEvents().filter(e => e.type === 'approval/decided');
   assert.equal(decisions.length, 2); assert(decisions.every(e => e.data.outcome === 'allowed-once'));
@@ -121,5 +127,5 @@ if(p.hook_event_name==='Stop') console.log(JSON.stringify(p.stop_hook_active?{}:
   await hooksFiber.dispose();
   rows = (await readFile(capture, 'utf8')).trim().split('\n').map(JSON.parse);
   assert(rows.some(row => row.hook_event_name === 'SessionEnd'), 'approved cleanup must run on plugin unload');
-  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'native approval audit', 'real Typert Gateway permission API', 'cross-session answer rejection', 'non-interactive peer rejection', 'session revocation', 'full non-shell arguments', 'tool deny', 'first-request context', 'Stop continuation state and text', 'script hot reload and renewed permission', 'native SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
+  console.log(JSON.stringify({ result: 'passed', harness: packages.get('@deepseek-ai/dsh-agent').manifest.version, checks: ['real Cordis/AgentLoop', 'real shell command + JSON stdin', 'native approval audit', 'real Typert Gateway permission API', 'cross-session, wrong-fingerprint and duplicate answer rejection', 'non-interactive peer rejection', 'session revocation', 'full non-shell arguments', 'tool deny', 'first-request context', 'PostToolUse replacement with model continuation', 'Stop continuation state and text', 'script hot reload and renewed permission', 'native SlotCore and Remote descriptor registration', 'approved SessionEnd cleanup and plugin disposal'] }, null, 2));
 } finally { await ctx.fiber.dispose(); protocolResolution.deregister(); await rm(dir, { recursive: true, force: true }); }

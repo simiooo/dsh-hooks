@@ -10,6 +10,10 @@ const signal = () => new AbortController().signal;
 const success = (stdout = '') => ({ exitCode: 0, stdout: { text: stdout }, stderr: { text: '' } });
 const hook = (command, extra = {}) => ({ type: 'command', command, ...extra });
 const config = (event, handlers) => ({ hooks: { [event]: [{ hooks: handlers }] } });
+async function until(check) {
+  const deadline = Date.now() + 3000;
+  while (!check()) { assert(Date.now() < deadline, 'operation did not settle'); await new Promise(r => setTimeout(r, 5)); }
+}
 async function fixture(t, data, execute = () => success(), authorize = async () => true, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh hooks '));
   const file = join(dir, 'hooks.json'); await writeFile(file, JSON.stringify(data));
@@ -75,7 +79,7 @@ test('edit during human review withdraws the old request and runs no stale comma
 
 test('malformed reload cannot silently execute the previous approved configuration', async t => {
   const f = await fixture(t, config('PreToolUse', [hook('old')])); await f.run();
-  await writeFile(f.file, '{'); assert((await f.run()).halt); assert.equal(f.calls.length, 1);
+  await writeFile(f.file, '{'); const invalid = await f.run(); assert(invalid.block && invalid.deferred); assert.equal(f.calls.length, 1);
   await writeFile(f.file, JSON.stringify(config('PreToolUse', [hook('new')]))); await f.run();
   assert.equal(f.calls[1].command, 'new'); assert.equal(f.reviews.length, 2);
 });
@@ -156,4 +160,110 @@ test('plugin manifests resolve resources, environment, and enforce root confinem
   assert.notEqual((await loadSnapshot(root, { discover: false, pluginRoots: [root] })).fingerprint, one.fingerprint);
   await writeFile(join(root, 'plugin.json'), JSON.stringify({ extensions: { 'com.openai': { hooks: './../outside.json' } } }));
   await assert.rejects(loadSnapshot(root, { discover: false, pluginRoots: [root] }), /escapes root/);
+});
+
+test('permission timeout bounds even a provider that ignores cancellation; late answers cannot grant', async t => {
+  let finish;
+  const f = await fixture(t, config('PreToolUse', [hook('gate')]), undefined, () => new Promise(r => finish = r), { permissionTimeoutMs: 30 });
+  const result = await f.run(); assert(result.block && result.deferred); assert.equal(f.calls.length, 0);
+  finish(true); await new Promise(r => setTimeout(r, 10));
+  assert((await f.run()).block); assert.equal(f.reviews.length, 2); assert.equal(f.calls.length, 0);
+});
+
+test('concurrent approval waiters cancel independently and share one human decision', async t => {
+  let finish, reviewSignal;
+  const f = await fixture(t, config('PreToolUse', [hook('gate')]), undefined, (_request, sig) => { reviewSignal = sig; return new Promise(r => finish = r); });
+  const first = new AbortController(); const a = f.run('PreToolUse', first.signal); const b = f.run();
+  await until(() => finish); await new Promise(r => setTimeout(r, 30)); first.abort();
+  assert((await a).deferred); assert.equal(reviewSignal.aborted, false); finish(true);
+  assert.equal((await b).block, false); assert.equal(f.reviews.length, 1); assert.equal(f.calls.length, 1);
+});
+
+test('the final cancelled waiter withdraws approval and disposal cannot hang on an ignored provider signal', async t => {
+  let reviewSignal;
+  const f = await fixture(t, config('PreToolUse', [hook('gate')]), undefined, (_request, sig) => { reviewSignal = sig; return new Promise(() => {}); });
+  const controller = new AbortController(); const pending = f.run('PreToolUse', controller.signal);
+  await until(() => reviewSignal); controller.abort(); assert((await pending).deferred); assert(reviewSignal.aborted);
+  const next = f.run(); await until(() => f.reviews.length === 2); await f.engine.dispose(); assert((await next).deferred);
+  assert.equal(f.calls.length, 0);
+});
+
+test('a directory change during review invalidates the old grant and payload without running stale work', async t => {
+  let finish;
+  const f = await fixture(t, config('PreToolUse', [hook('gate')]), undefined, () => new Promise(r => finish = r));
+  const nextDir = join(f.dir, 'other'); await mkdir(nextDir);
+  const pending = f.run(); await until(() => finish); f.engine.attach('session', nextDir); finish(true);
+  assert((await pending).deferred); assert.equal(f.calls.length, 0);
+  const next = f.run(); await until(() => f.reviews.length === 2); finish(true); assert.equal((await next).block, false);
+  assert.equal(f.calls[0].workdir, nextDir); assert.equal(f.reviews[1].cwd, nextDir);
+});
+
+test('invalid configuration arriving with approval returns an unavailable gate rather than a rejected promise', async t => {
+  let finish;
+  const f = await fixture(t, config('PreToolUse', [hook('gate')]), undefined, () => new Promise(r => finish = r));
+  const pending = f.run(); await until(() => finish); await writeFile(f.file, '{'); finish(true);
+  assert((await pending).deferred); assert.equal(f.calls.length, 0);
+});
+
+test('background output survives its triggering turn cancellation but revoke discards retained output', async t => {
+  let finish;
+  const f = await fixture(t, config('PostToolUse', [hook('async', { async: true })]), () => new Promise(r => finish = r));
+  const controller = new AbortController(); await f.run('PostToolUse', controller.signal); controller.abort();
+  assert.equal(f.calls[0].signal.aborted, false);
+  finish(success('{"continue":false,"decision":"block","hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"later"}}'));
+  let contexts = []; await until(() => { contexts = f.engine.takeContexts('session'); return contexts.length; }); assert.deepEqual(contexts, ['later']);
+  await f.run('PostToolUse'); finish(success('{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"stale"}}'));
+  await new Promise(r => setTimeout(r, 20)); f.engine.revoke('session'); assert.deepEqual(f.engine.takeContexts('session'), []);
+});
+
+test('background work is cancelled on detach and cannot publish to a recreated session with the same ID', async t => {
+  let finish;
+  const f = await fixture(t, config('PostToolUse', [hook('async', { async: true })]), request => new Promise(r => {
+    finish = () => r(success('{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"old session"}}'));
+    request.signal.addEventListener('abort', finish, { once: true });
+  }));
+  await f.run('PostToolUse'); const detach = f.engine.detach('session'); f.engine.attach('session', f.dir); await detach;
+  assert.deepEqual(f.engine.takeContexts('session'), []); assert.equal(f.calls[0].signal.aborted, true);
+  await f.run('PostToolUse'); assert.equal(f.reviews.length, 2); finish();
+});
+
+test('already cancelled operations neither execute commands nor request permission', async t => {
+  const f = await fixture(t, config('PreToolUse', [hook('never')])); const controller = new AbortController(); controller.abort();
+  assert((await f.run('PreToolUse', controller.signal)).deferred); assert.equal(f.reviews.length + f.calls.length, 0);
+});
+
+test('retained startup context is revision scoped; options are copied and immutable', async t => {
+  const paths = [];
+  const f = await fixture(t, config('SessionStart', [hook('start')]), () => success('startup'), undefined, { watchPaths: paths });
+  paths.push('not-part-of-engine'); assert.deepEqual(f.engine.options.watchPaths, []);
+  assert.throws(() => f.engine.options.watchPaths.push('mutate'));
+  const output = await f.run('SessionStart'); f.engine.retainContexts('session', output); assert.deepEqual(f.engine.takeContexts('session'), ['startup']);
+  f.engine.revoke('session'); f.engine.retainContexts('session', output); assert.deepEqual(f.engine.takeContexts('session'), []);
+});
+
+test('context spill preserves both ends and full output; zero means unlimited', async t => {
+  const content = 'A'.repeat(60) + 'Z'.repeat(60);
+  const f = await fixture(t, config('SessionStart', [hook('start', { additionalContextLimit: 10 })]), () => success(content));
+  const output = (await f.run('SessionStart')).context[0]; assert(output.startsWith('A'.repeat(20))); assert(output.endsWith('Z'.repeat(20)));
+  const file = output.match(/Full output: (.+)\]/)[1]; assert.equal(await readFile(file, 'utf8'), content); t.after(() => rm(file, { force: true }));
+  const unlimited = await fixture(t, config('SessionStart', [hook('start', { additionalContextLimit: 0 })]), () => success(content));
+  assert.equal((await unlimited.run('SessionStart')).context[0], content);
+});
+
+test('a refresh already reading the old cwd publishes only the new directory snapshot', async t => {
+  const f = await fixture(t, config('PreToolUse', [hook('old')]), undefined, undefined, { configPaths: ['hooks.json'] });
+  const nextDir = join(f.dir, 'new'); await mkdir(nextDir); await writeFile(join(nextDir, 'hooks.json'), JSON.stringify(config('PreToolUse', [hook('new')])));
+  const refresh = f.engine.refresh('session'); f.engine.attach('session', nextDir);
+  assert.deepEqual((await refresh).hooks.map(h => h.command), ['new']);
+  await f.run(); assert.deepEqual(f.calls.map(c => c.command), ['new']); assert.equal(f.reviews[0].cwd, nextDir);
+});
+
+test('background queue overflow skips excess invocations and does not exceed total capacity', async t => {
+  const f = await fixture(t, config('PostToolUse', Array.from({ length: 270 }, () => hook('async', { async: true }))));
+  await f.run('PostToolUse'); await until(() => f.calls.length === 264);
+  assert.equal(f.logs.filter(l => l.includes('queue is full')).length, 6);
+});
+
+test('tiny timeout fractions are rounded to a positive millisecond', async t => {
+  const f = await fixture(t, config('PreToolUse', [hook('tiny', { timeout: 0.0001 })])); await f.run(); assert.equal(f.calls[0].timeoutMs, 1);
 });

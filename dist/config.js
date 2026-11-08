@@ -38,8 +38,8 @@ export function parseHooks(raw, source, env = {}, platform = process.platform) {
                 if (typeof command !== 'string' || !command.trim())
                     throw new Error(`${source}: command must be nonempty`);
                 const timeout = rawHook.timeout ?? rawHook.timeoutSec;
-                if (timeout !== undefined && (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0))
-                    throw new Error(`${source}: timeout must be positive seconds`);
+                if (timeout !== undefined && (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0 || timeout * 1000 > 2_147_483_647))
+                    throw new Error(`${source}: timeout must be positive timer-safe seconds`);
                 if (rawHook.async !== undefined && typeof rawHook.async !== 'boolean')
                     throw new Error(`${source}: async must be boolean`);
                 const limit = rawHook.additionalContextLimit ?? 2500;

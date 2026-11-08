@@ -33,7 +33,15 @@ var __esDecorate = (this && this.__esDecorate) || function (ctor, descriptorIn, 
     done = true;
 };
 import { randomUUID } from 'node:crypto';
-import { object } from './protocol.js';
+import { EVENTS, object } from './protocol.js';
+export function isPermissionRequest(value) {
+    return object(value) && value.schema === 'dsh-hooks/approval-v1' && value.scope === 'session'
+        && typeof value.sessionId === 'string' && !!value.sessionId && typeof value.cwd === 'string'
+        && typeof value.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(value.fingerprint)
+        && Array.isArray(value.hooks) && value.hooks.length > 0 && value.hooks.every(hook => object(hook)
+        && EVENTS.includes(hook.event) && typeof hook.command === 'string' && !!hook.command.trim()
+        && typeof hook.source === 'string' && (hook.statusMessage === undefined || typeof hook.statusMessage === 'string'));
+}
 /** Host-side human permission queue, exported only through Harness's authenticated Typert Gateway. */
 export async function installPermissionApi(ctx, revoke) {
     const { TypertRemoteService, Remote } = await import('@deepseek-ai/dsh-typert-protocol');
@@ -67,7 +75,7 @@ export async function installPermissionApi(ctx, revoke) {
             }
             owner() {
                 const invocation = this.ctx.invocation;
-                if (!invocation || invocation.peer.principal.kind !== 'owner' || invocation.peer.interactions !== 'answer')
+                if (invocation?.peer?.principal?.kind !== 'owner' || invocation.peer.interactions !== 'answer')
                     throw new Error('Only the interactive Host owner may review executable hooks');
             }
             list(request) {
@@ -78,7 +86,7 @@ export async function installPermissionApi(ctx, revoke) {
             answer(request) {
                 this.owner();
                 const sid = sessionId(request);
-                if (!object(request) || typeof request.id !== 'string' || typeof request.fingerprint !== 'string' || !['allow-session', 'deny'].includes(String(request.decision)))
+                if (!object(request) || typeof request.id !== 'string' || !request.id || typeof request.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(request.fingerprint) || typeof request.decision !== 'string' || !['allow-session', 'deny'].includes(request.decision))
                     throw new TypeError('invalid hook decision');
                 const entry = pending.get(request.id);
                 if (!entry || entry.request.sessionId !== sid || entry.request.fingerprint !== request.fingerprint)
@@ -104,8 +112,9 @@ export async function installPermissionApi(ctx, revoke) {
         catch {
             return next();
         }
-        if (request.schema !== 'dsh-hooks/approval-v1' || request.sessionId !== native.agent.id)
+        if (!isPermissionRequest(request) || request.sessionId !== native.agent?.id)
             return next();
+        const review = request;
         return new Promise(resolve => {
             const id = randomUUID();
             const finish = (allowed) => {
@@ -115,7 +124,7 @@ export async function installPermissionApi(ctx, revoke) {
                 resolve(allowed ? 'allowed-once' : 'rejected');
             };
             const abort = () => finish(false);
-            pending.set(id, { id, request, finish });
+            pending.set(id, { id, request: review, finish });
             native.signal?.addEventListener('abort', abort, { once: true });
             if (native.signal?.aborted)
                 abort();

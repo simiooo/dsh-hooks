@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decode, matches, merge } from '../dist/protocol.js';
+import { decode, matches, merge, EVENTS } from '../dist/protocol.js';
 import { parseHooks } from '../dist/config.js';
 
 const json = value => JSON.stringify(value);
@@ -58,4 +58,35 @@ test('PreToolUse applies deny, context, and recognizes the rewrite capability ga
 test('a stop halt wins over another handler requesting continuation', () => {
   const out = merge([decode('Stop', 0, json({ decision: 'block', reason: 'more' }), ''), decode('Stop', 0, json({ continue: false, stopReason: 'done' }), '')]);
   assert.equal(out.halt, true); assert.equal(out.block, true);
+  assert.equal(out.reason, 'done');
+});
+
+test('every event accepts empty success and rejects malformed shared field types', () => {
+  for (const event of EVENTS) {
+    assert.deepEqual(decode(event, 0, ' \n', ''), { block: false, halt: false, context: [] });
+    for (const output of ['null', 'true', '[]', '{', json({ continue: 'false' }), json({ stopReason: 1 }), json({ suppressOutput: 'yes' }), json({ systemMessage: {} }), json({ hookSpecificOutput: { hookEventName: event, additionalContext: [] } })]) {
+      assert.throws(() => decode(event, 0, output, ''), `${event}: ${output}`);
+    }
+  }
+});
+
+test('PostToolUse replaces results without halting; deny feedback outranks replacement across handlers', () => {
+  const replace = decode('PostToolUse', 0, json({ continue: false, stopReason: 'replacement' }), '');
+  assert.equal(replace.replace, true); assert.equal(replace.halt, false); assert.equal(replace.block, false);
+  const deny = decode('PostToolUse', 0, json({ decision: 'block', reason: 'policy' }), '');
+  for (const outputs of [[replace, deny], [deny, replace]]) assert.equal(merge(outputs).reason, 'policy');
+  for (const output of [{ suppressOutput: false }, { updatedMCPToolOutput: {} }, { hookSpecificOutput: { hookEventName: 'PostToolUse', updatedMCPToolOutput: {} } }]) assert.throws(() => decode('PostToolUse', 0, json(output), ''));
+});
+
+test('Interrupt and SessionEnd controls are advisory; Stop cannot inject unofficial additionalContext', () => {
+  for (const event of ['Interrupt', 'SessionEnd']) {
+    const out = decode(event, 0, json({ continue: false, decision: 'block', reason: 'advisory', hookSpecificOutput: { hookEventName: event, additionalContext: 'ignored' } }), '');
+    assert.equal(out.block || out.halt, false); assert.deepEqual(out.context, []);
+  }
+  assert.deepEqual(decode('Stop', 0, specific('Stop', { additionalContext: 'ignored' }), '').context, []);
+});
+
+test('timer overflow, malformed executable settings and input rewrites fail before execution', () => {
+  for (const timeout of [2_147_484, NaN, Number.MAX_VALUE]) assert.throws(() => parseHooks({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'x', timeout }] }] } }, 'f'));
+  for (const fields of [{ permissionDecision: 'allow', updatedInput: null }, { permissionDecision: 'deny', updatedInput: {} }, { permissionDecisionReason: 4 }]) assert.throws(() => decode('PreToolUse', 0, specific('PreToolUse', fields), ''));
 });

@@ -15,9 +15,9 @@ window.__ModuleLoader__.load({
     };
     function parseRequest(value, sessionId) {
       try {
-        if (!value || value.schema !== 'dsh-hooks/approval-v1' || value.scope !== 'session' || value.sessionId !== sessionId || typeof value.id !== 'string'
-          || typeof value.cwd !== 'string' || !/^[0-9a-f]{64}$/.test(value.fingerprint) || !Array.isArray(value.hooks)
-          || !value.hooks.length || !value.hooks.every(hook => typeof hook.event === 'string' && typeof hook.command === 'string' && typeof hook.source === 'string')) return null;
+        if (!value || value.schema !== 'dsh-hooks/approval-v1' || value.scope !== 'session' || value.sessionId !== sessionId || typeof value.id !== 'string' || !value.id
+          || typeof value.cwd !== 'string' || typeof value.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(value.fingerprint) || !Array.isArray(value.hooks)
+          || !value.hooks.length || !value.hooks.every(hook => hook && ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd'].includes(hook.event) && typeof hook.command === 'string' && hook.command.trim() && typeof hook.source === 'string')) return null;
         return value;
       } catch { return null; }
     }
@@ -109,8 +109,12 @@ window.__ModuleLoader__.load({
           const api = scope.remote.dshHooksPermissions;
           const unwrap = result => { if (!result.ok) throw result.error; return result.value; };
           function PermissionDock({ sessionId, t }) {
+            return h(SessionPermissionDock, { key: sessionId, sessionId, t });
+          }
+          function SessionPermissionDock({ sessionId, t }) {
             const [request, setRequest] = React.useState(null);
             const [offline, setOffline] = React.useState(false);
+            const settled = React.useRef(new Set());
             React.useEffect(() => {
               let active = true, timer;
               setRequest(null);
@@ -118,7 +122,7 @@ window.__ModuleLoader__.load({
                 try {
                   const result = unwrap(await api.list({ sessionId }));
                   if (!active) return;
-                  const next = parseRequest(result.requests?.[0], sessionId);
+                  const next = (result.requests ?? []).map(row => parseRequest(row, sessionId)).find(row => row && !settled.current.has(row.id)) ?? null;
                   setRequest(current => current?.id === next?.id ? current : next); setOffline(false);
                 } catch { if (active) { setOffline(true); setRequest(null); } }
                 finally { if (active) timer = setTimeout(poll, 500); }
@@ -129,8 +133,10 @@ window.__ModuleLoader__.load({
             const pending = React.useMemo(() => request ? {
               key: request.id, answerable: true,
               async answer(outcome) {
-                const reply = unwrap(await api.answer({ sessionId, id: request.id, fingerprint: request.fingerprint, decision: outcome === 'allowed-once' ? 'allow-session' : 'deny' }));
-                if (!reply.accepted) throw new Error('Hook permission request was withdrawn');
+                unwrap(await api.answer({ sessionId, id: request.id, fingerprint: request.fingerprint, decision: outcome === 'allowed-once' ? 'allow-session' : 'deny' }));
+                // A withdrawn/answered request is final. Ignore stale in-flight list responses.
+                settled.current.add(request.id);
+                if (settled.current.size > 512) settled.current.delete(settled.current.values().next().value);
                 setRequest(current => current?.id === request.id ? null : current);
               },
             } : null, [request, sessionId]);
@@ -138,11 +144,15 @@ window.__ModuleLoader__.load({
             return h(PermissionPanel, { key: pending.key, pending, request, t });
           }
           function Revoke({ sessionId, t }) {
+            return h(SessionRevoke, { key: sessionId, sessionId, t });
+          }
+          function SessionRevoke({ sessionId, t }) {
             const [busy, setBusy] = React.useState(false);
             const [failed, setFailed] = React.useState(false);
+            const lock = React.useRef(false);
             return h('button', { type: 'button', title: failed ? t('failed') : t('revoke'), 'aria-label': t('revoke'), disabled: busy,
               style: { background: 'transparent', color: 'inherit', border: 0, borderRadius: 6, padding: 6, cursor: 'pointer' },
-              onClick: async () => { setBusy(true); try { unwrap(await api.revoke({ sessionId })); setFailed(false); } catch { setFailed(true); } finally { setBusy(false); } },
+              onClick: async () => { if (lock.current) return; lock.current = true; setBusy(true); try { unwrap(await api.revoke({ sessionId })); setFailed(false); } catch { setFailed(true); } finally { lock.current = false; setBusy(false); } },
             }, h('svg', { viewBox: '0 0 24 24', width: 16, height: 16, fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, 'aria-hidden': true },
               h('path', { d: 'M12 3 4.5 6v5.5c0 4.4 3 7.8 7.5 9.5 4.5-1.7 7.5-5.1 7.5-9.5V6L12 3Z' }), h('path', { d: 'm9 9 6 6m0-6-6 6' })));
           }

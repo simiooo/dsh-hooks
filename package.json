@@ -1,6 +1,6 @@
 {
   "name": "@simiooo/dsh-hooks",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Codex command hooks for DeepSeek Harness, with human approval and hot reload",
   "type": "module",
   "license": "MIT",
@@ -24,6 +24,7 @@
     "icon.svg",
     "cordis.patch.yml",
     "README.md",
+    "docs",
     "LICENSE"
   ],
   "dsh": {
